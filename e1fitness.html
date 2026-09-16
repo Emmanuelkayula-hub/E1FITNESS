@@ -338,9 +338,6 @@ textarea.input{resize:vertical;min-height:70px;}
 .day-pill.today{border-color:var(--blue);}
 .day-pill.logged .dp-n{color:var(--green);}
 
-.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
-.photo-grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;border:1px solid var(--line);}
-
 hr.hairline{border:none;border-top:1px solid var(--line);margin:14px 0;}
 .swipe-del{color:var(--red);background:none;border:none;font-size:12px;font-weight:600;}
 
@@ -503,8 +500,7 @@ function defaultDB(){
     activityLogs:[], // {id,date,type,label,calories,minutes}
     meals:[], // saved meals/recipes: {id,name,items:[{foodId,servings}]}
     mealPlan:{}, // "date|slot" -> mealId or foodLogEntry ref (simple: date->slot->mealId)
-    measurements:[], // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
-    progressPhotos:[] // {id,date,dataUrl,note}
+    measurements:[] // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
   };
 }
 
@@ -547,7 +543,7 @@ function validateDB(data){
     errors.push('File is not a valid E1FITNESS backup (not a JSON object).');
     return {valid:false, errors, warnings};
   }
-  const REQUIRED_ARRAYS = ['exercises','routines','sessions','foods','foodLogs','activityLogs','meals','measurements','progressPhotos'];
+  const REQUIRED_ARRAYS = ['exercises','routines','sessions','foods','foodLogs','activityLogs','meals','measurements'];
   REQUIRED_ARRAYS.forEach(k=>{ if(!Array.isArray(data[k])) errors.push(`Missing or invalid "${k}" list.`); });
   if(!data.settings || typeof data.settings!=='object') errors.push('Missing "settings".');
   if(data.waterLogs!=null && typeof data.waterLogs!=='object') errors.push('Invalid "waterLogs".');
@@ -689,7 +685,7 @@ function save(){
       // JSON never contained its own save time — BUG E).
       DB.settings.lastSavedAt = new Date().toISOString();
       localStorage.setItem(STORE_KEY, JSON.stringify(DB));
-    }catch(e){ toast('Storage full — try removing some progress photos.'); }
+    }catch(e){ toast('Storage full — try exporting a backup and clearing older workout history.'); }
   }, 120);
 }
 
@@ -2859,7 +2855,7 @@ function startSession(routineId){
   }));
   DB.activeSession = {
     id:uid(), date:todayISO(), routineId: routine?routine.id:null, routineName: routine?routine.name:'Quick Workout',
-    startedAt:Date.now(), groups, notes:'', photos:[]
+    startedAt:Date.now(), groups, notes:''
   };
   save();
   wkNav('active-session');
@@ -2904,12 +2900,6 @@ function renderActiveSession(root){
       <div class="card-title">Session Notes</div>
       <textarea class="input" id="sessNotes" placeholder="How did it feel?">${escapeHtml(s.notes||'')}</textarea>
     </div>
-    <div class="card">
-      <div class="card-title">Progress Photos</div>
-      <div class="photo-grid" id="sessPhotos">${s.photos.map((p,i)=>`<img src="${p}" data-ph="${i}">`).join('')}</div>
-      <button class="btn btn-sm" id="addPhoto" style="margin-top:8px;">+ Add Photo</button>
-      <input type="file" id="photoInput" accept="image/*" class="hidden">
-    </div>
     <div class="session-card">
       <div class="card-title" style="margin-bottom:9px;">Session</div>
       <div class="ses-stats" id="sesStats"></div>
@@ -2947,13 +2937,6 @@ function renderActiveSession(root){
     });
   });
   $('#sessNotes').addEventListener('input', e=>{ s.notes=e.target.value; save(); });
-  $('#addPhoto').addEventListener('click', ()=> $('#photoInput').click());
-  $('#photoInput').addEventListener('change', e=>{
-    const file = e.target.files[0]; if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ()=>{ s.photos.push(reader.result); save(); renderActiveSession(root); };
-    reader.readAsDataURL(file);
-  });
   renderExBlocks();
 
   function renderExBlocks(){
@@ -3355,7 +3338,6 @@ function renderSessionDetail(root){
       </table></div>`;
     }).join('')).join('')}
     ${s.notes? `<div class="card"><div class="card-title">Notes</div><p style="font-size:13.5px;margin:0;">${escapeHtml(s.notes)}</p></div>`:''}
-    ${s.photos && s.photos.length? `<div class="card"><div class="card-title">Photos</div><div class="photo-grid">${s.photos.map(p=>`<img src="${p}">`).join('')}</div></div>`:''}
   `;
   wireBack(()=> wkNav('history'));
   $('#delSess').addEventListener('click', ()=>{
@@ -4121,7 +4103,7 @@ renderers.progress = function(){
   const weight = weightSummary();
   const goalLine = weight.goalLbs!=null ? {y: toDisplayWeight(weight.goalLbs), label:'Goal '+fmt1(toDisplayWeight(weight.goalLbs))+' '+unitLabel(), color:'#3BD182'} : null;
   root.innerHTML = `
-    <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements, weight & photos</div></div>
+    <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
     <div class="card">
       <div class="card-title">Weight Trend</div>
       ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'#5A87F5', points:weightPoints}], {autoRange:true, refLine:goalLine})}
@@ -4139,25 +4121,11 @@ renderers.progress = function(){
       </table>
     </div>
     <div class="card">
-      <div class="card-title">Progress Photos</div>
-      <div class="photo-grid">${DB.progressPhotos.slice().reverse().map(p=>`<img src="${p.dataUrl}" title="${escapeHtml(p.date)}">`).join('') || ''}</div>
-      ${DB.progressPhotos.length===0? '<div class="sub" style="padding:8px 0;">No photos yet.</div>':''}
-      <button class="btn btn-sm" id="addProgPhoto" style="margin-top:8px;">+ Add Photo</button>
-      <input type="file" id="progPhotoInput" accept="image/*" class="hidden">
-    </div>
-    <div class="card">
       <div class="card-title">Not Connected</div>
       <div class="sub">Apple Health sync isn't available in this preview — log weight and measurements here manually. See Settings → Connected Apps.</div>
     </div>
   `;
   $('#addMeasurement').addEventListener('click', openMeasurementModal);
-  $('#addProgPhoto').addEventListener('click', ()=> $('#progPhotoInput').click());
-  $('#progPhotoInput').addEventListener('change', e=>{
-    const file = e.target.files[0]; if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ()=>{ DB.progressPhotos.push({id:uid(), date:todayISO(), dataUrl:reader.result}); save(); renderCurrent(); };
-    reader.readAsDataURL(file);
-  });
 };
 
 /* FEATURE 2: shared weight-logging helpers. Logging weight from either the quick
