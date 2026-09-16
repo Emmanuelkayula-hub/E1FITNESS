@@ -459,7 +459,16 @@ function openModal(innerHtml, {center=false, id='m'}={}){
   back.className = 'modal-backdrop' + (center?' center':'');
   back.id = 'backdrop-'+id;
   back.innerHTML = `<div class="modal">${innerHtml}</div>`;
-  back.addEventListener('click', (e)=>{ if(e.target===back) closeModal(id); });
+  // Every modal template reuses id="mClose" for its ✕ button, and some flows
+  // (e.g. Settings -> "Erase All Data", or a failed import while Settings is
+  // still open) leave an earlier modal in the DOM underneath a new one. A
+  // plain document-wide $('#mClose').addEventListener(...) in the caller can
+  // then bind to the OLDER modal's (now-covered, unreachable) close button
+  // instead of this one, leaving the visible ✕ dead. Handling the close
+  // click here via delegation on THIS backdrop guarantees it only ever
+  // reacts to a click on ITS OWN ✕ (or its own empty backdrop area),
+  // regardless of what any other open modal's elements are also called.
+  back.addEventListener('click', (e)=>{ if(e.target===back || e.target.closest('#mClose')) closeModal(id); });
   root.appendChild(back);
   return back;
 }
@@ -2373,7 +2382,19 @@ function backHeader(title, onBack, right=''){
     ${right}
   </div>`;
 }
-function wireBack(fn){ const b=$('#backBtn'); if(b) b.addEventListener('click', fn); }
+// Switching tabs only toggles .hidden on each tab's screen div — it never
+// clears their content — so a workout subview and a nutrition subview can
+// both be holding a #backHeader button with id="backBtn" at the same time
+// (one hidden, one visible). A plain $('#backBtn') is a document-wide
+// querySelector, so it can return the HIDDEN tab's button, silently
+// attaching the click handler to a button the user can't see or tap while
+// the visible one does nothing. Scope the lookup to the active tab's own
+// screen so it always finds the button that's actually on screen.
+function wireBack(fn){
+  const activeScreen = $('#screen-'+currentTab);
+  const b = activeScreen ? activeScreen.querySelector('#backBtn') : null;
+  if(b) b.addEventListener('click', fn);
+}
 
 function renderWorkoutHome(root){
   root.innerHTML = `
