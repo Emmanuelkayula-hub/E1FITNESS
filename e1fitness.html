@@ -222,11 +222,13 @@ textarea.input{resize:vertical;min-height:70px;}
 
 /* Toast */
 #toast{
-  position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(20px);
+  position:fixed;left:50%;bottom:168px;transform:translateX(-50%) translateY(20px);
   background:var(--surface-3);border:1px solid var(--line);color:var(--paper);
   padding:10px 16px;border-radius:10px;font-size:13px;z-index:200;opacity:0;pointer-events:none;
   transition:all .25s;box-shadow:0 8px 20px rgba(0,0,0,0.35);
+  max-width:calc(100% - 32px);text-align:center;line-height:1.4;
 }
+#toast.pr{border-color:var(--green);background:rgba(59,209,130,0.14);}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 
 /* rest timer bar */
@@ -269,12 +271,15 @@ textarea.input{resize:vertical;min-height:70px;}
 .set-row .set-check.done{background:var(--green);border-color:var(--green);}
 .set-row .set-check svg{width:18px;height:18px;stroke:var(--muted);fill:none;stroke-width:2.8;}
 .set-row .set-check.done svg{stroke:#08130D;}
-.set-row .set-tagbtn{width:34px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted);font-size:10.5px;flex-shrink:0;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+.set-row .set-tagbtn{width:34px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted);font-size:9.5px;flex-shrink:0;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+.set-row .rpe-input{flex:none !important;width:38px !important;min-width:38px;font-size:13px !important;padding:12px 0 !important;}
 
 .exercise-block{background:var(--surface);border:1px solid var(--line-2);border-radius:17px;padding:0;margin-bottom:12px;overflow:hidden;}
 .exercise-block .ex-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:15px 15px 12px;}
 .exercise-block .ex-head .ex-name{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:19px;line-height:1.1;text-transform:uppercase;letter-spacing:0.02em;}
 .exercise-block .ex-head .ex-tag{font-size:10.5px;color:var(--blue);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;}
+.ex-target{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:11.5px;color:var(--ember);margin-top:3px;}
+.ex-notes{margin:0 15px 10px;font-size:12.5px;color:var(--muted-2);line-height:1.4;font-style:italic;}
 .ex-lasttime{display:flex;align-items:center;gap:8px;margin:0 15px 11px;background:var(--ink);border:1px solid var(--line);border-radius:10px;padding:9px 11px;}
 .ex-lasttime svg{flex:none;stroke:var(--ember);}
 .ex-lasttime .ll-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:.07em;color:var(--muted-2);text-transform:uppercase;white-space:nowrap;}
@@ -323,6 +328,8 @@ textarea.input{resize:vertical;min-height:70px;}
 .pill-row .btn{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:11px 4px;color:var(--paper);font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:.06em;text-transform:uppercase;}
 
 .food-badge{flex:none;font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:8.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--blue-tint);background:var(--blue-dim);padding:3px 6px;border-radius:5px;}
+.fav-star{flex:none;background:none;border:none;font-size:20px;line-height:1;color:var(--faint);padding:4px 2px;min-width:32px;min-height:32px;}
+.fav-star.on{color:var(--ember);}
 
 .day-strip{display:flex;gap:6px;margin-bottom:14px;}
 .day-pill{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 2px;text-align:center;}
@@ -330,9 +337,6 @@ textarea.input{resize:vertical;min-height:70px;}
 .day-pill .dp-n{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:13px;margin-top:2px;}
 .day-pill.today{border-color:var(--blue);}
 .day-pill.logged .dp-n{color:var(--green);}
-
-.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
-.photo-grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;border:1px solid var(--line);}
 
 hr.hairline{border:none;border-top:1px solid var(--line);margin:14px 0;}
 .swipe-del{color:var(--red);background:none;border:none;font-size:12px;font-weight:600;}
@@ -408,15 +412,25 @@ function localISODate(d=new Date()){
 }
 const todayISO = () => localISODate(new Date());
 const clamp = (n,a,b) => Math.max(a, Math.min(b, n));
+/* Parses a form field's raw string as a number, but keeps the existing value
+   when the field is blank/unparseable — unlike `parseFloat(x)||keep`, this
+   does NOT fall back when the user explicitly typed a legitimate 0 (BUG B:
+   `0 || default` incorrectly treats a real zero as "unset"). */
+function parsedOrKeep(raw, keep){
+  if(raw==null || raw===''){ return keep; }
+  const n = parseFloat(raw);
+  return isNaN(n) ? keep : n;
+}
 function fmt1(n){ return (Math.round(n*10)/10).toString(); }
 function fmtInt(n){ return Math.round(n).toString(); }
 
-function toast(msg){
+function toast(msg, opts={}){
   const t = $('#toast');
   t.textContent = msg;
+  t.classList.toggle('pr', !!opts.pr);
   t.classList.add('show');
   clearTimeout(toast._t);
-  toast._t = setTimeout(()=> t.classList.remove('show'), 2200);
+  toast._t = setTimeout(()=> t.classList.remove('show'), opts.pr ? 3200 : 2200);
 }
 
 function escapeHtml(s){
@@ -456,17 +470,25 @@ function closeAllModals(){ $('#modalRoot').innerHTML=''; }
    ========================================================= */
 const STORE_KEY = 'e1fitness_db_v1';
 
+/* Bumped whenever the DB shape changes in a way migrate() needs to handle.
+   Never reset the database to bump this — migrate() must transform old data
+   in place so nothing the user saved is ever lost. */
+const SCHEMA_VERSION = 2;
+
 function defaultDB(){
   return {
+    schemaVersion: SCHEMA_VERSION,
     settings:{
       units:'lbs', // 'lbs' | 'kg'
       netCarbMode:false,
       restDefault:90,
+      showRPE:false, // RPE/RIR logging is opt-in — off by default so it never clutters set entry
       onboarded:false, // flips true once the first-launch onboarding flow is completed
       connectedApps:{ appleHealth:false, wearOS:false, googleFit:false, fitbit:false, garmin:false, grocery:false },
       goals:{ calories:2200, protein:150, carbs:230, fat:70, fiber:30, sodium:2300, water:8 },
       profile:{ heightCm:null, weightLbs:null, age:null, sex:null, activityLevel:1.375, goalWeightLbs:null, goalType:'maintain', intensity:'normal' },
-      lastBackup:null
+      lastSavedAt:null,   // last time the DB was written to localStorage (every save())
+      lastExportedAt:null // last time the user actually downloaded a backup file
     },
     exercises:[], // seeded below
     routines:[],
@@ -478,31 +500,172 @@ function defaultDB(){
     activityLogs:[], // {id,date,type,label,calories,minutes}
     meals:[], // saved meals/recipes: {id,name,items:[{foodId,servings}]}
     mealPlan:{}, // "date|slot" -> mealId or foodLogEntry ref (simple: date->slot->mealId)
-    measurements:[], // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
-    progressPhotos:[] // {id,date,dataUrl,note}
+    measurements:[] // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
   };
 }
 
 let DB = load();
 
+/* Transforms a loaded DB in place from whatever schemaVersion it was saved
+   under up to SCHEMA_VERSION. Every step only adds/backfills fields — it
+   never deletes user data (exercises, routines, sessions, nutrition
+   history, measurements, photos, settings all survive untouched). */
+function migrate(db){
+  if(db.schemaVersion==null) db.schemaVersion = 1; // pre-versioning saves
+  if(db.schemaVersion < 2){
+    // v1 -> v2: routine exercises gain a real set/rep/weight/rest/RPE prescription
+    // (BUG A) instead of implicitly meaning "one set"; rename the misleading
+    // lastBackup field (BUG E) since it recorded the last *save*, not a backup/export.
+    (db.routines||[]).forEach(r=> (r.groups||[]).forEach(g=> g.forEach(item=> migrateRoutineItem(item))));
+    if(db.settings){
+      if(db.settings.lastSavedAt===undefined) db.settings.lastSavedAt = db.settings.lastBackup ?? null;
+      if(db.settings.lastExportedAt===undefined) db.settings.lastExportedAt = null;
+      delete db.settings.lastBackup;
+      if(db.settings.showRPE===undefined) db.settings.showRPE = false;
+    }
+    db.schemaVersion = 2;
+  }
+  return db;
+}
+
+const VALID_EXERCISE_TYPES = ['weight_reps','bodyweight','assisted','duration','cardio'];
+
+/* Data-integrity check reused for two purposes: (1) gating backup imports
+   (BUG D) so a malformed/corrupt file can never overwrite good data, and
+   (2) an optional developer diagnostic (see runDiagnostics()) — this never
+   runs automatically against the live DB and never surfaces in the normal
+   UI. `errors` are things that make the data unsafe to load (blocks import);
+   `warnings` are things worth knowing about but not fatal (dangling
+   references, duplicate barcodes) — surfaced in the console, not the UI. */
+function validateDB(data){
+  const errors = [], warnings = [];
+  if(!data || typeof data!=='object' || Array.isArray(data)){
+    errors.push('File is not a valid E1FITNESS backup (not a JSON object).');
+    return {valid:false, errors, warnings};
+  }
+  const REQUIRED_ARRAYS = ['exercises','routines','sessions','foods','foodLogs','activityLogs','meals','measurements'];
+  REQUIRED_ARRAYS.forEach(k=>{ if(!Array.isArray(data[k])) errors.push(`Missing or invalid "${k}" list.`); });
+  if(!data.settings || typeof data.settings!=='object') errors.push('Missing "settings".');
+  if(data.waterLogs!=null && typeof data.waterLogs!=='object') errors.push('Invalid "waterLogs".');
+  if(data.mealPlan!=null && typeof data.mealPlan!=='object') errors.push('Invalid "mealPlan".');
+  if(errors.length) return {valid:false, errors, warnings}; // can't safely inspect further without these
+
+  const isNum = v => typeof v==='number' && Number.isFinite(v); // rejects NaN and ±Infinity
+  const validDate = v => typeof v==='string' && !isNaN(new Date(v+'T00:00:00').getTime());
+
+  const exIds = new Set();
+  data.exercises.forEach((e,i)=>{
+    if(!e || typeof e!=='object' || !e.id){ errors.push(`Exercise #${i} is missing an id.`); return; }
+    if(exIds.has(e.id)) errors.push(`Duplicate exercise id "${e.id}".`);
+    exIds.add(e.id);
+    if(!VALID_EXERCISE_TYPES.includes(e.type)) errors.push(`Exercise "${e.name||e.id}" has an invalid type "${e.type}".`);
+  });
+
+  const foodIds = new Set();
+  const barcodeOwners = new Map();
+  data.foods.forEach((f,i)=>{
+    if(!f || typeof f!=='object' || !f.id){ errors.push(`Food #${i} is missing an id.`); return; }
+    if(foodIds.has(f.id)) errors.push(`Duplicate food id "${f.id}".`);
+    foodIds.add(f.id);
+    ['calories','protein','carbs','fat','fiber','sodium','servingGrams'].forEach(k=>{
+      if(f[k]!=null && !isNum(f[k])) errors.push(`Food "${f.name||f.id}" has a non-numeric ${k}.`);
+    });
+    if(f.barcode){
+      if(barcodeOwners.has(f.barcode)) warnings.push(`Barcode "${f.barcode}" is shared by "${f.name}" and "${barcodeOwners.get(f.barcode)}".`);
+      barcodeOwners.set(f.barcode, f.name);
+    }
+  });
+
+  const routineIds = new Set();
+  data.routines.forEach((r,i)=>{
+    if(!r || typeof r!=='object' || !r.id){ errors.push(`Routine #${i} is missing an id.`); return; }
+    if(routineIds.has(r.id)) errors.push(`Duplicate routine id "${r.id}".`);
+    routineIds.add(r.id);
+    (r.groups||[]).forEach(g=> (g||[]).forEach(item=>{
+      if(!exIds.has(item.exerciseId)) warnings.push(`Routine "${r.name}" references a missing exercise.`);
+    }));
+  });
+
+  const sessionIds = new Set();
+  data.sessions.forEach((s,i)=>{
+    if(!s || typeof s!=='object' || !s.id){ errors.push(`Session #${i} is missing an id.`); return; }
+    if(sessionIds.has(s.id)) errors.push(`Duplicate session id "${s.id}".`);
+    sessionIds.add(s.id);
+    if(!validDate(s.date)) errors.push(`Session ${s.id} has an invalid date.`);
+    if(s.startedAt!=null && !isNum(s.startedAt)) errors.push(`Session ${s.id} has an invalid startedAt.`);
+    (s.groups||[]).forEach(g=> (g||[]).forEach(entry=>{
+      if(!exIds.has(entry.exerciseId)) warnings.push(`Session ${s.id} references a missing exercise.`);
+      if(entry.exType && !VALID_EXERCISE_TYPES.includes(entry.exType)) warnings.push(`Session ${s.id} has an entry with invalid type "${entry.exType}".`);
+      (entry.sets||[]).forEach(set=>{
+        ['weight','reps','assistWeight','durationSec','distance','calories','rpe'].forEach(k=>{
+          if(set[k]!=null && !isNum(set[k])) errors.push(`Session ${s.id} has a non-numeric ${k} value.`);
+        });
+      });
+    }));
+  });
+  if(data.activeSession){
+    (data.activeSession.groups||[]).forEach(g=> (g||[]).forEach(entry=>{
+      if(!exIds.has(entry.exerciseId)) warnings.push('Active session references a missing exercise.');
+    }));
+  }
+
+  data.foodLogs.forEach((l,i)=>{
+    if(!l || typeof l!=='object' || !l.id){ errors.push(`Food log #${i} is missing an id.`); return; }
+    if(!foodIds.has(l.foodId)) warnings.push(`Food log ${l.id} references a missing food.`);
+    if(l.amount!=null && !isNum(l.amount)) errors.push(`Food log ${l.id} has a non-numeric amount.`);
+    if(!validDate(l.date)) errors.push(`Food log ${l.id} has an invalid date.`);
+  });
+
+  data.measurements.forEach((m,i)=>{
+    if(!m || typeof m!=='object' || !m.id){ errors.push(`Measurement #${i} is missing an id.`); return; }
+    if(!validDate(m.date)) errors.push(`Measurement ${m.id} has an invalid date.`);
+    ['weight','bodyFat','waist','chest','hips','arm','thigh'].forEach(k=>{
+      if(m[k]==null) return;
+      if(!isNum(m[k])) errors.push(`Measurement ${m.id} has a non-numeric ${k}.`);
+      else if(m[k]<0) errors.push(`Measurement ${m.id} has a negative ${k}.`);
+    });
+  });
+
+  return {valid: errors.length===0, errors, warnings};
+}
+
+/* Developer/diagnostic mode only — call runDiagnostics() from the browser
+   console. Never invoked automatically and never rendered in the normal UI,
+   per the "no technical clutter" requirement. */
+function runDiagnostics(){
+  const result = validateDB(DB);
+  console.log(`[E1FITNESS diagnostics] ${result.valid?'DB looks structurally sound.':'DB has integrity errors!'}`);
+  if(result.errors.length){ console.group('Errors'); result.errors.forEach(e=>console.error(e)); console.groupEnd(); }
+  if(result.warnings.length){ console.group('Warnings'); result.warnings.forEach(w=>console.warn(w)); console.groupEnd(); }
+  return result;
+}
+
+/* Fills in any field missing from a saved/imported DB with the current
+   default, without touching a single field that's already present. Shared
+   by load() (opening the app) and the backup-import flow, so both go
+   through the exact same upgrade path. */
+function backfillDefaults(parsed){
+  const d = defaultDB();
+  Object.keys(d).forEach(k=>{ if(parsed[k]===undefined) parsed[k]=d[k]; });
+  if(!parsed.settings.connectedApps) parsed.settings.connectedApps = d.settings.connectedApps;
+  if(!parsed.settings.goals) parsed.settings.goals = d.settings.goals;
+  if(!parsed.settings.profile) parsed.settings.profile = d.settings.profile;
+  // Backfill any individual fields added to goals/profile since the user's last save,
+  // so upgrading the app never drops a returning user into missing-data states.
+  Object.keys(d.settings.goals).forEach(k=>{ if(parsed.settings.goals[k]===undefined) parsed.settings.goals[k]=d.settings.goals[k]; });
+  Object.keys(d.settings.profile).forEach(k=>{ if(parsed.settings.profile[k]===undefined) parsed.settings.profile[k]=d.settings.profile[k]; });
+  return parsed;
+}
+
 function load(){
   try{
     const raw = localStorage.getItem(STORE_KEY);
     if(raw){
-      const parsed = JSON.parse(raw);
-      const d = defaultDB();
-      // shallow merge with defaults to survive schema growth
-      Object.keys(d).forEach(k=>{ if(parsed[k]===undefined) parsed[k]=d[k]; });
-      if(!parsed.settings.connectedApps) parsed.settings.connectedApps = d.settings.connectedApps;
-      if(!parsed.settings.goals) parsed.settings.goals = d.settings.goals;
-      if(!parsed.settings.profile) parsed.settings.profile = d.settings.profile;
-      // Backfill any individual fields added to goals/profile since the user's last save,
-      // so upgrading the app never drops a returning user into missing-data states.
-      Object.keys(d.settings.goals).forEach(k=>{ if(parsed.settings.goals[k]===undefined) parsed.settings.goals[k]=d.settings.goals[k]; });
-      Object.keys(d.settings.profile).forEach(k=>{ if(parsed.settings.profile[k]===undefined) parsed.settings.profile[k]=d.settings.profile[k]; });
+      const parsed = backfillDefaults(JSON.parse(raw));
       // Grandfather in any existing save from before onboarding existed — only genuinely
       // fresh installs (no saved data at all) should ever see the onboarding flow.
       if(parsed.settings.onboarded===undefined) parsed.settings.onboarded = true;
+      migrate(parsed);
       return parsed;
     }
   }catch(e){ console.warn('load failed', e); }
@@ -516,9 +679,13 @@ function save(){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{
     try{
+      // Stamp lastSavedAt BEFORE stringifying so the timestamp that gets
+      // written is actually the timestamp of the data being written
+      // (previously this was set after localStorage.setItem, so the saved
+      // JSON never contained its own save time — BUG E).
+      DB.settings.lastSavedAt = new Date().toISOString();
       localStorage.setItem(STORE_KEY, JSON.stringify(DB));
-      DB.settings.lastBackup = new Date().toISOString();
-    }catch(e){ toast('Storage full — try removing some progress photos.'); }
+    }catch(e){ toast('Storage full — try exporting a backup and clearing older workout history.'); }
   }, 120);
 }
 
@@ -769,7 +936,13 @@ function seedExercises(){
 }
 
 function food(name, servingLabel, servingGrams, kcal, p, c, f, fiber, sodium, barcode){
-  return {id:uid(), name, brand:'', servingLabel, servingGrams, calories:kcal, protein:p, carbs:c, fat:f, fiber:fiber||0, sodium:sodium||0, barcode:barcode||'', custom:false};
+  return {id:uid(), name, brand:'', servingLabel, servingGrams, calories:kcal, protein:p, carbs:c, fat:f, fiber:fiber||0, sodium:sodium||0, barcode:barcode||'', custom:false, favorite:false};
+}
+function toggleFoodFavorite(id){
+  const f = foodById(id);
+  if(!f) return;
+  f.favorite = !f.favorite;
+  save();
 }
 function seedFoods(){
   return [
@@ -1370,6 +1543,11 @@ function seedData(target){
       [{exerciseId:findEx('Leg Extension'), restSec:0},{exerciseId:findEx('Leg Curl'), restSec:60}],
     ]},
   ];
+  // Backfill target sets/reps/weight/RPE prescriptions on the seeded routines
+  // above (they're written with just exerciseId+restSec for brevity) via the
+  // same migration path old user routines go through, so there's one source
+  // of truth for "what a routine exercise looks like".
+  target.routines.forEach(r=> r.groups.forEach(g=> g.forEach(item=> migrateRoutineItem(item))));
   const findFood = n => target.foods.find(f=>f.name===n).id;
   target.meals = [
     {id:uid(), name:'High-Protein Breakfast', items:[
@@ -1426,8 +1604,6 @@ function warmupSets(workingWeight, workingReps){
     {pct:0.8, weight: roundWeight(workingWeight*0.8), reps:3},
   ];
 }
-
-function calcAge(){ return null; } // placeholder, no DOB collected
 
 function profileWeightLbs(){
   const p = DB.settings.profile;
@@ -1711,19 +1887,64 @@ function computeStreak(){
   return streak;
 }
 
+/* Longest historical run of consecutive training days, across all logged
+   sessions — distinct from computeStreak() which only reports the CURRENT
+   run ending today. */
+function computeBestStreak(){
+  const days = Array.from(new Set(DB.sessions.map(s=>s.date))).sort();
+  if(days.length===0) return 0;
+  let best=1, cur=1;
+  for(let i=1;i<days.length;i++){
+    const prev = new Date(days[i-1]+'T00:00:00');
+    const next = new Date(days[i]+'T00:00:00');
+    const diffDays = Math.round((next-prev)/86400000);
+    cur = diffDays===1 ? cur+1 : 1;
+    best = Math.max(best, cur);
+  }
+  return best;
+}
+/* Working sets (see isWorkingSet — warm-ups excluded) performed per exercise
+   category over the last `days` days, for a simple muscle-group balance view. */
+function muscleGroupSetCounts(days){
+  const cutoff = daysAgoISO(days-1);
+  const counts = {};
+  DB.sessions.filter(s=> s.date>=cutoff).forEach(s=>{
+    (s.groups||[]).forEach(g=> g.forEach(entry=>{
+      const e = exById(entry.exerciseId);
+      const cat = e ? e.category : 'Other';
+      const working = (entry.sets||[]).filter(isWorkingSet).length;
+      if(working>0) counts[cat] = (counts[cat]||0) + working;
+    }));
+  });
+  return Object.entries(counts).sort((a,b)=> b[1]-a[1]);
+}
+
 function daysAgoISO(n){ const d = new Date(); d.setDate(d.getDate()-n); return localISODate(d); }
+/* Single definition of "This Week" used everywhere in the app: a rolling
+   7-day window that includes today and the 6 days before it (NOT today +
+   7 previous days, which would silently make every "week" an 8-day span).
+   Dashboard, workout stats and progress stats must all call this — do not
+   compute an ad-hoc cutoff elsewhere. */
+const THIS_WEEK_DAYS = 7;
+function thisWeekCutoffISO(){ return daysAgoISO(THIS_WEEK_DAYS-1); }
 function weekVolume(){
-  const cutoff = daysAgoISO(7); // string comparison works because YYYY-MM-DD sorts lexicographically
+  const cutoff = thisWeekCutoffISO(); // string comparison works because YYYY-MM-DD sorts lexicographically
   let vol=0;
   DB.sessions.filter(s=> s.date>=cutoff).forEach(s=> vol += sessionVolume(s));
   return vol;
 }
 
+/* A set counts toward volume/PRs only once it's marked done AND isn't tagged
+   Warmup — warm-up sets are deliberately excluded so they can't inflate
+   working-set volume, PR calculations or strength trend charts (see the
+   PR/1RM audit: warm-up sets must never masquerade as working performance). */
+function isWorkingSet(set){ return !!set.done && set.tag!=='Warmup'; }
+
 function sessionVolume(session){
   let v=0;
   (session.groups||[]).forEach(g=>g.forEach(ex=>{
     (ex.sets||[]).forEach(s=>{
-      if(s.done && s.weight!=null && s.reps!=null) v += (s.weight*s.reps);
+      if(isWorkingSet(s) && s.weight!=null && s.reps!=null) v += (s.weight*s.reps);
     });
   }));
   return v;
@@ -1886,7 +2107,7 @@ renderers.dashboard = function(){
       <div class="card-title">This Week</div>
       <div class="stat-grid">
         <div class="stat-box"><div class="sv">${fmtInt(weekVolume())}</div><div class="sl">${unitLabel()}·reps volume</div></div>
-        <div class="stat-box"><div class="sv">${DB.sessions.filter(s=> s.date>=daysAgoISO(7)).length}</div><div class="sl">Workouts logged</div></div>
+        <div class="stat-box"><div class="sv">${DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length}</div><div class="sl">Workouts logged</div></div>
       </div>
     </div>
 
@@ -2185,7 +2406,7 @@ function computePRs(exerciseId){
       if(exEntry.exerciseId!==exerciseId) return;
       let sessionVol=0; let sessionBest1RM=0; let did=false;
       (exEntry.sets||[]).forEach(set=>{
-        if(!set.done) return;
+        if(!isWorkingSet(set)) return;
         did=true;
         if(set.weight!=null && set.reps!=null){
           maxWeight = Math.max(maxWeight, set.weight);
@@ -2199,6 +2420,23 @@ function computePRs(exerciseId){
     }));
   });
   return {maxWeight, best1RM, maxVolume, count, oneRMPoints};
+}
+
+/* Real-time PR toast, fired the instant a set is checked off — not just at
+   finish-workout time. Only ever compares against actual completed sessions
+   already in history (computePRs never sees the in-progress session), so
+   this can't manufacture a PR from an incomplete or hypothetical set, and
+   only counts when the estimate genuinely beats what's on record. */
+function announcePRIfAny(entry, set){
+  if(entry.exType!=='weight_reps') return; // 1RM only makes sense for loaded weight+reps lifts
+  if(!isWorkingSet(set) || set.weight==null || set.reps==null) return;
+  const e = exById(entry.exerciseId);
+  if(!e) return;
+  const priorBest1RM = computePRs(e.id).best1RM;
+  const thisEst = estimate1RM(set.weight, set.reps);
+  if(thisEst>0 && thisEst>priorBest1RM){
+    toast(`NEW PR — ${e.name}: ${fmt1(toDisplayWeight(set.weight))} ${unitLabel()} × ${set.reps} · est. 1RM ${fmt1(toDisplayWeight(thisEst))} ${unitLabel()}`, {pr:true});
+  }
 }
 
 /* ---------------- Routines list ---------------- */
@@ -2244,7 +2482,7 @@ function renderTemplateDetail(root){
       ${r.groups.map((g,gi)=> g.map((item,ii)=>{
         const e = exById(item.exerciseId);
         const label = g.length>1 ? String.fromCharCode(65+gi)+(ii+1)+' · ' : '';
-        return `<div class="list-row"><div class="lr-main"><div class="lr-title">${label}${escapeHtml(e?e.name:'?')}</div><div class="lr-sub">${e?escapeHtml(e.equipment)+' · '+exTypeLabel(e.type):''}</div></div></div>`;
+        return `<div class="list-row"><div class="lr-main"><div class="lr-title">${label}${escapeHtml(e?e.name:'?')}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div></div></div>`;
       }).join('')).join('')}
     </div>
     <button class="btn btn-primary btn-block" id="startTemplate" style="margin-bottom:14px;">Start This Template</button>
@@ -2290,22 +2528,29 @@ function renderRoutineEdit(root){
         <div class="card-title">${g.length>1?'Superset':'Exercise'} ${gi+1} <button class="swipe-del" data-rmgroup="${gi}">Remove</button></div>
         ${g.map((item,ii)=>{
           const e = exById(item.exerciseId);
-          return `<div class="list-row"><div class="lr-main"><div class="lr-title">${escapeHtml(e?e.name:'Unknown')}</div><div class="lr-sub">Rest ${item.restSec}s</div></div>
+          return `<div class="list-row" data-edititem="${gi}:${ii}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e?e.name:'Unknown')}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div></div>
           <button class="swipe-del" data-rmitem="${gi}:${ii}">✕</button></div>`;
         }).join('')}
         <button class="btn btn-sm btn-ghost" data-addtogroup="${gi}" style="margin-top:6px;">+ Add exercise to this group (superset)</button>
       </div>
     `).join('');
     $$('[data-rmgroup]').forEach(b=> b.addEventListener('click', ()=>{ draft.groups.splice(parseInt(b.dataset.rmgroup),1); renderGroupsList(); }));
-    $$('[data-rmitem]').forEach(b=> b.addEventListener('click', ()=>{
+    $$('[data-rmitem]').forEach(b=> b.addEventListener('click', (ev)=>{
+      ev.stopPropagation();
       const [gi,ii] = b.dataset.rmitem.split(':').map(Number);
       draft.groups[gi].splice(ii,1);
       if(draft.groups[gi].length===0) draft.groups.splice(gi,1);
       renderGroupsList();
     }));
+    $$('[data-edititem]').forEach(el=> el.addEventListener('click', ()=>{
+      const [gi,ii] = el.dataset.edititem.split(':').map(Number);
+      const item = draft.groups[gi][ii];
+      const e = exById(item.exerciseId);
+      openRoutineItemEditor(item, e?e.name:'Exercise', ()=> renderGroupsList());
+    }));
     $$('[data-addtogroup]').forEach(b=> b.addEventListener('click', ()=>{
       openExercisePickerModal((exercise)=>{
-        draft.groups[parseInt(b.dataset.addtogroup)].push({exerciseId:exercise.id, restSec:DB.settings.restDefault});
+        draft.groups[parseInt(b.dataset.addtogroup)].push(defaultRoutineItem(exercise.id));
         renderGroupsList();
       });
     }));
@@ -2313,7 +2558,7 @@ function renderRoutineEdit(root){
 
   $('#addGroup').addEventListener('click', ()=>{
     openExercisePickerModal((exercise)=>{
-      draft.groups.push([{exerciseId:exercise.id, restSec:DB.settings.restDefault}]);
+      draft.groups.push([defaultRoutineItem(exercise.id)]);
       renderGroupsList();
     });
   });
@@ -2360,14 +2605,89 @@ function openExercisePickerModal(onPick){
   }
 }
 
+/* Prescription editor for a single routine exercise: sets, rep range, optional
+   target weight, rest, optional RPE target and notes. Kept as one flat form
+   (not a per-type wizard) so editing a routine stays fast. */
+function openRoutineItemEditor(item, exerciseName, onSave){
+  openModal(`
+    <div class="modal-head"><h3>${escapeHtml(exerciseName)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="row">
+      <div class="field"><label>Sets</label><input class="input" id="riSets" type="number" min="1" step="1" value="${item.targetSets}"></div>
+      <div class="field"><label>Rest (sec)</label><input class="input" id="riRest" type="number" min="0" step="5" value="${item.restSec}"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Rep range — min</label><input class="input" id="riRepMin" type="number" min="1" step="1" value="${item.targetRepsMin}"></div>
+      <div class="field"><label>Rep range — max</label><input class="input" id="riRepMax" type="number" min="1" step="1" value="${item.targetRepsMax}"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Target weight (${unitLabel()}) <span style="color:var(--faint);">optional</span></label><input class="input" id="riWeight" type="number" step="0.5" min="0" value="${item.targetWeight!=null?fmt1(toDisplayWeight(item.targetWeight)):''}"></div>
+      <div class="field"><label>RPE target <span style="color:var(--faint);">optional</span></label><input class="input" id="riRpe" type="number" min="1" max="10" step="0.5" value="${item.rpeTarget??''}"></div>
+    </div>
+    <div class="field"><label>Notes</label><input class="input" id="riNotes" value="${escapeHtml(item.notes||'')}" placeholder="Optional cue, e.g. pause reps"></div>
+    <button class="btn btn-primary btn-block" id="riSave">Save</button>
+  `, {id:'routineitem'});
+  $('#mClose').addEventListener('click', ()=> closeModal('routineitem'));
+  $('#riSave').addEventListener('click', ()=>{
+    const sets = parseInt($('#riSets').value);
+    const restRaw = $('#riRest').value;
+    const repMin = parseInt($('#riRepMin').value);
+    const repMaxRaw = parseInt($('#riRepMax').value);
+    const wRaw = $('#riWeight').value;
+    const rpeRaw = $('#riRpe').value;
+    item.targetSets = (!isNaN(sets) && sets>0) ? sets : item.targetSets;
+    item.restSec = restRaw===''? item.restSec : Math.max(0, parseInt(restRaw)||0);
+    item.targetRepsMin = (!isNaN(repMin) && repMin>0) ? repMin : item.targetRepsMin;
+    item.targetRepsMax = (!isNaN(repMaxRaw) && repMaxRaw>=item.targetRepsMin) ? repMaxRaw : item.targetRepsMin;
+    item.targetWeight = wRaw===''? null : fromDisplayWeight(parseFloat(wRaw));
+    item.rpeTarget = rpeRaw===''? null : parseFloat(rpeRaw);
+    item.notes = $('#riNotes').value.trim();
+    closeModal('routineitem');
+    onSave();
+  });
+}
+
+/* Exercise substitution — real alternatives only, drawn from the same
+   category (muscle group) in the actual exercise library, ranked by closest
+   equipment match. Never fabricates a "science-backed" equivalence; if the
+   library has nothing else in that category it says so plainly. */
+function openReplaceExerciseModal(entry, onReplace){
+  const cur = exById(entry.exerciseId);
+  if(!cur){ toast('Cannot find the current exercise'); return; }
+  const alternatives = DB.exercises
+    .filter(e=> e.id!==cur.id && e.category===cur.category)
+    .sort((a,b)=>{
+      const aEq = a.equipment===cur.equipment ? 0 : 1, bEq = b.equipment===cur.equipment ? 0 : 1;
+      return (aEq-bEq) || a.name.localeCompare(b.name);
+    });
+  if(alternatives.length===0){
+    openModal(`
+      <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="empty"><div class="e-title">No suitable alternative found</div><div class="e-sub">No other ${escapeHtml(cur.category)} exercises are in your library yet.</div></div>
+    `, {id:'replaceex'});
+    $('#mClose').addEventListener('click', ()=> closeModal('replaceex'));
+    return;
+  }
+  openModal(`
+    <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="sub" style="margin-bottom:10px;">Same muscle group (${escapeHtml(cur.category)}) · closest equipment match first</div>
+    <div>${alternatives.map(e=>`<div class="list-row" data-alt="${e.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e.name)}</div><div class="lr-sub">${escapeHtml(e.equipment)} · ${exTypeLabel(e.type)}</div></div></div>`).join('')}</div>
+  `, {id:'replaceex'});
+  $('#mClose').addEventListener('click', ()=> closeModal('replaceex'));
+  $$('[data-alt]').forEach(el=> el.addEventListener('click', ()=>{
+    const alt = exById(el.dataset.alt);
+    closeModal('replaceex');
+    onReplace(alt);
+  }));
+}
+
 /* ---------------- Active Session ---------------- */
 function blankSetForType(type){
-  if(type==='weight_reps') return {weight:null, reps:null, done:false, tag:'Working'};
-  if(type==='bodyweight') return {reps:null, done:false, tag:'Working'};
-  if(type==='assisted') return {assistWeight:null, reps:null, done:false, tag:'Working'};
-  if(type==='duration') return {durationSec:null, done:false, tag:'Working'};
-  if(type==='cardio') return {distance:null, durationSec:null, calories:null, done:false, tag:'Working'};
-  return {done:false, tag:'Working'};
+  if(type==='weight_reps') return {weight:null, reps:null, done:false, tag:'Working', rpe:null};
+  if(type==='bodyweight') return {reps:null, done:false, tag:'Working', rpe:null};
+  if(type==='assisted') return {assistWeight:null, reps:null, done:false, tag:'Working', rpe:null};
+  if(type==='duration') return {durationSec:null, done:false, tag:'Working', rpe:null};
+  if(type==='cardio') return {distance:null, durationSec:null, calories:null, done:false, tag:'Working', rpe:null};
+  return {done:false, tag:'Working', rpe:null};
 }
 
 function findLastSetForExercise(exerciseId, preferRoutineId){
@@ -2378,8 +2698,9 @@ function findLastSetForExercise(exerciseId, preferRoutineId){
       for(const g of s.groups){
         for(const e of g){
           if(e.exerciseId!==exerciseId) continue;
+          const workingSets = e.sets.filter(isWorkingSet);
           const doneSets = e.sets.filter(st=>st.done);
-          const last = doneSets[doneSets.length-1] || e.sets[e.sets.length-1];
+          const last = workingSets[workingSets.length-1] || doneSets[doneSets.length-1] || e.sets[e.sets.length-1];
           if(last) return last;
         }
       }
@@ -2411,6 +2732,24 @@ function lastSessionLineForExercise(exerciseId, excludeSessionId){
   }
   return null;
 }
+/* Full previous-session set list (in order, including tags) for the "Previous"
+   reference column in the active workout — unlike lastSessionLineForExercise
+   (a one-line summary) this preserves per-set detail so set 1 can be compared
+   against set 1, set 2 against set 2, etc. Returns [] if never performed. */
+function previousSetsForExercise(exerciseId, excludeSessionId){
+  const sorted = [...DB.sessions].filter(s=>s.id!==excludeSessionId).sort((a,b)=> b.startedAt-a.startedAt);
+  for(const sess of sorted){
+    for(const g of sess.groups){
+      for(const e of g){
+        if(e.exerciseId!==exerciseId) continue;
+        const doneSets = e.sets.filter(st=>st.done);
+        if(doneSets.length===0) continue;
+        return doneSets.map(st=>({...st, exType:e.exType}));
+      }
+    }
+  }
+  return [];
+}
 function setDisplayShort(type, set){
   const u = unitLabel();
   if(type==='weight_reps') return (set.weight!=null && set.reps!=null) ? `${fmt1(toDisplayWeight(set.weight))} × ${set.reps}` : null;
@@ -2436,21 +2775,94 @@ function templateStats(routineId){
   return { lastDate: sessions[0]? sessions[0].date : null, timesCompleted: sessions.length, sessions };
 }
 
+/* A routine exercise is a real prescription, not just an exercise reference —
+   see BUG A: routines used to only ever spin up a single set at session
+   start, silently dropping the planned set count. */
+function defaultRoutineItem(exerciseId){
+  return {
+    exerciseId,
+    restSec: DB.settings.restDefault,
+    targetSets: 3,
+    targetRepsMin: 8,
+    targetRepsMax: 12,
+    targetWeight: null, // lbs internally, optional
+    rpeTarget: null,
+    notes: ''
+  };
+}
+/* Backfills a routine exercise saved before target prescriptions existed.
+   Never overwrites a value that's already present — only fills gaps, so
+   routines the user already fine-tuned are left exactly as they are. */
+function migrateRoutineItem(item){
+  if(item.targetSets==null || item.targetSets<1) item.targetSets = 3;
+  if(item.targetRepsMin==null) item.targetRepsMin = 8;
+  if(item.targetRepsMax==null) item.targetRepsMax = item.targetRepsMin;
+  if(item.targetWeight===undefined) item.targetWeight = null;
+  if(item.rpeTarget===undefined) item.rpeTarget = null;
+  if(item.notes===undefined) item.notes = '';
+  if(item.restSec==null) item.restSec = DB.settings.restDefault;
+  return item;
+}
+/* Prescription line shown under an exercise during an active session — frozen
+   from the routine at the moment the session started, so later edits to the
+   routine never retroactively change a workout already in progress. */
+function entryTargetLine(entry){
+  const parts = [];
+  if(entry.targetRepsMin!=null || entry.targetRepsMax!=null){
+    const rmin = entry.targetRepsMin, rmax = entry.targetRepsMax;
+    parts.push(rmin==null||rmax==null||rmin===rmax ? `Target ${rmax??rmin} reps` : `Target ${rmin}–${rmax} reps`);
+  }
+  if(entry.targetWeight!=null) parts.push(`${fmt1(toDisplayWeight(entry.targetWeight))} ${unitLabel()}`);
+  if(entry.rpeTarget!=null) parts.push(`RPE ${entry.rpeTarget}`);
+  return parts.join(' · ');
+}
+function routineItemSummary(item){
+  const u = unitLabel();
+  const repRange = item.targetRepsMin===item.targetRepsMax ? item.targetRepsMax : `${item.targetRepsMin}–${item.targetRepsMax}`;
+  const parts = [`${item.targetSets} × ${repRange}`];
+  if(item.targetWeight!=null) parts.push(`${fmt1(toDisplayWeight(item.targetWeight))} ${u}`);
+  parts.push(`Rest ${item.restSec}s`);
+  if(item.rpeTarget!=null) parts.push(`RPE ${item.rpeTarget}`);
+  return parts.join(' · ');
+}
+
 function startSession(routineId){
   const routine = routineId ? routineById(routineId) : null;
   const groups = (routine? routine.groups : []).map(g=> g.map(item=>{
     const e = exById(item.exerciseId);
     const type = e?e.type:'weight_reps';
-    const last = findLastSetForExercise(item.exerciseId, routine?routine.id:null);
-    return {exerciseId:item.exerciseId, exType:type, restSec:item.restSec||DB.settings.restDefault, sets:[prefillSetForType(type,last)]};
+    const prevSets = previousSetsForExercise(item.exerciseId, null);
+    const targetSets = Math.max(1, item.targetSets||1);
+    const sets = [];
+    for(let i=0;i<targetSets;i++){
+      // Prefer the previous session's set at the same index (set 1 vs set 1,
+      // set 2 vs set 2, ...) so multi-set prefill mirrors how the lift was
+      // actually performed, falling back to its last set if there were fewer.
+      const prevForIndex = prevSets[i] || prevSets[prevSets.length-1] || null;
+      const base = prefillSetForType(type, prevForIndex);
+      if(type==='weight_reps' || type==='assisted' || type==='bodyweight'){
+        if(base.reps==null && item.targetRepsMax!=null) base.reps = item.targetRepsMax;
+      }
+      if(type==='weight_reps' && base.weight==null && item.targetWeight!=null) base.weight = item.targetWeight;
+      sets.push(base);
+    }
+    return {
+      exerciseId:item.exerciseId, exType:type, restSec: item.restSec??DB.settings.restDefault,
+      targetRepsMin:item.targetRepsMin??null, targetRepsMax:item.targetRepsMax??null,
+      targetWeight:item.targetWeight??null, rpeTarget:item.rpeTarget??null, notes:item.notes||'',
+      sets
+    };
   }));
   DB.activeSession = {
     id:uid(), date:todayISO(), routineId: routine?routine.id:null, routineName: routine?routine.name:'Quick Workout',
-    startedAt:Date.now(), groups, notes:'', photos:[]
+    startedAt:Date.now(), groups, notes:''
   };
   save();
   wkNav('active-session');
-  if(routine) toast('Loaded last weights & reps for '+routine.name);
+  if(routine){
+    const totalSets = groups.reduce((n,g)=> n+g.reduce((m,e)=> m+e.sets.length,0), 0);
+    toast(`Loaded ${routine.name} — ${totalSets} set${totalSets!==1?'s':''} across ${groups.reduce((n,g)=>n+g.length,0)} exercise${groups.reduce((n,g)=>n+g.length,0)!==1?'s':''}`);
+  }
 }
 
 /* Flattens the session's exercise groups into a linear list (with group/item
@@ -2487,12 +2899,6 @@ function renderActiveSession(root){
     <div class="card">
       <div class="card-title">Session Notes</div>
       <textarea class="input" id="sessNotes" placeholder="How did it feel?">${escapeHtml(s.notes||'')}</textarea>
-    </div>
-    <div class="card">
-      <div class="card-title">Progress Photos</div>
-      <div class="photo-grid" id="sessPhotos">${s.photos.map((p,i)=>`<img src="${p}" data-ph="${i}">`).join('')}</div>
-      <button class="btn btn-sm" id="addPhoto" style="margin-top:8px;">+ Add Photo</button>
-      <input type="file" id="photoInput" accept="image/*" class="hidden">
     </div>
     <div class="session-card">
       <div class="card-title" style="margin-bottom:9px;">Session</div>
@@ -2531,13 +2937,6 @@ function renderActiveSession(root){
     });
   });
   $('#sessNotes').addEventListener('input', e=>{ s.notes=e.target.value; save(); });
-  $('#addPhoto').addEventListener('click', ()=> $('#photoInput').click());
-  $('#photoInput').addEventListener('change', e=>{
-    const file = e.target.files[0]; if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ()=>{ s.photos.push(reader.result); save(); renderActiveSession(root); };
-    reader.readAsDataURL(file);
-  });
   renderExBlocks();
 
   function renderExBlocks(){
@@ -2546,21 +2945,55 @@ function renderActiveSession(root){
       const e = exById(exEntry.exerciseId);
       const label = g.length>1 ? String.fromCharCode(65+gi)+(ii+1) : '';
       const prev = e ? lastSessionLineForExercise(e.id, s.id) : null;
+      const prevSets = e ? previousSetsForExercise(e.id, s.id) : [];
+      const targetLine = entryTargetLine(exEntry);
       return `<div class="exercise-block" id="ex-${gi}-${ii}" data-gi="${gi}" data-ii="${ii}">
         <div class="ex-head">
-          <div><span class="ex-tag">${label}</span> <span class="ex-name">${escapeHtml(e?e.name:'?')}</span></div>
-          <button class="icon-btn" data-rmex="${gi}:${ii}" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          <div style="min-width:0;">
+            <div><span class="ex-tag">${label}</span> <span class="ex-name">${escapeHtml(e?e.name:'?')}</span></div>
+            ${targetLine? `<div class="ex-target">${escapeHtml(targetLine)}</div>` : ''}
+          </div>
+          <div style="display:flex;gap:6px;flex:none;">
+            <button class="icon-btn" data-replaceex="${gi}:${ii}" title="Replace exercise" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
+            <button class="icon-btn" data-rmex="${gi}:${ii}" title="Remove exercise" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          </div>
         </div>
-        ${prev ? `<div class="ex-lasttime"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span class="ll-lbl">Last time</span><span class="ll-val">${escapeHtml(prev.line)}</span></div>` : ''}
+        ${exEntry.notes? `<div class="ex-notes">${escapeHtml(exEntry.notes)}</div>` : ''}
+        ${prev ? `<div class="ex-lasttime"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span class="ll-lbl">Last time</span><span class="ll-val">${escapeHtml(prev.line)}</span></div>` : `<div class="ex-lasttime"><span class="ll-lbl">Previous</span><span class="ll-val">No previous workout</span></div>`}
         ${setHeaderRow(exEntry.exType)}
-        <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii)).join('')}</div>
+        <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii, prevSets[si])).join('')}</div>
         <div class="ex-foot">
           <button class="btn btn-sm btn-ghost" data-addset="${gi}:${ii}" style="flex:1;">+ Add Set</button>
+          ${exEntry.exType==='weight_reps' ? `<button class="btn btn-sm btn-ghost" data-addwarmup="${gi}:${ii}" style="flex:none;">+ Warm-up</button>` : ''}
           <button class="btn btn-sm btn-ghost" data-restcfg="${gi}:${ii}" style="flex:none;">Rest: ${exEntry.restSec}s</button>
         </div>
       </div>`;
     }).join('')).join('');
 
+    $$('[data-replaceex]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.replaceex.split(':').map(Number);
+      const entry = s.groups[gi][ii];
+      openReplaceExerciseModal(entry, (alt)=>{
+        entry.exerciseId = alt.id;
+        if(alt.type!==entry.exType){
+          entry.exType = alt.type;
+          entry.sets = entry.sets.map(()=> blankSetForType(alt.type));
+        }
+        save(); renderExBlocks(); renderSessionStats();
+        toast('Replaced with '+alt.name);
+      });
+    }));
+    $$('[data-addwarmup]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.addwarmup.split(':').map(Number);
+      const entry = s.groups[gi][ii];
+      const workingSet = entry.sets.find(st=> st.tag!=='Warmup' && st.weight!=null)
+        || (entry.targetWeight!=null ? {weight:entry.targetWeight, reps:entry.targetRepsMax||8} : null);
+      if(!workingSet){ toast('Enter a working weight first, then add warm-ups'); return; }
+      const ramp = warmupSets(toDisplayWeight(workingSet.weight), workingSet.reps||8);
+      const warmupEntries = ramp.map(r=> ({weight: fromDisplayWeight(r.weight), reps:r.reps, done:false, tag:'Warmup', rpe:null}));
+      entry.sets.unshift(...warmupEntries);
+      save(); renderExBlocks(); renderSessionStats();
+    }));
     $$('[data-rmex]').forEach(b=> b.addEventListener('click', ()=>{
       const [gi,ii] = b.dataset.rmex.split(':').map(Number);
       s.groups[gi].splice(ii,1);
@@ -2601,22 +3034,27 @@ function renderActiveSession(root){
       // so scroll position, keyboard, and input focus are preserved on mobile.
       const chk = $('.set-check', row);
       if(chk) chk.addEventListener('click', ()=>{
-        set.done = !set.done;
+        const turningOn = !set.done;
+        set.done = turningOn;
         chk.classList.toggle('done', set.done);
         save();
         renderSessionStats();
-        if(set.done && entry.restSec>0){
-          const exForRest = exById(entry.exerciseId);
-          startRestTimer(entry.restSec, exForRest ? exForRest.name : null);
+        if(turningOn){
+          if(entry.restSec>0){
+            const exForRest = exById(entry.exerciseId);
+            startRestTimer(entry.restSec, exForRest ? exForRest.name : null);
+          }
+          announcePRIfAny(entry, set);
         }
       });
       const tagBtn = $('.set-tagbtn', row);
       if(tagBtn) tagBtn.addEventListener('click', ()=>{
         const order = ['Working','Warmup','Drop','Failure'];
         const cur = order.indexOf(set.tag); set.tag = order[(cur+1)%order.length];
-        tagBtn.textContent = (set.tag||'W')[0];
+        tagBtn.textContent = setTagAbbrev(set.tag);
         tagBtn.title = 'Tag: '+set.tag;
         save();
+        renderSessionStats(); // warm-up/working toggles change what counts toward volume
       });
     });
   }
@@ -2659,6 +3097,23 @@ function openConfirmModal(message, onConfirm, opts={}){
   $('#cfOk').addEventListener('click', ()=>{ closeModal('confirm'); onConfirm(); });
 }
 
+/* Shown when a backup import fails validateDB(). Lists the specific
+   problems (no raw stack traces) and makes clear the current data was
+   never touched. */
+function openImportErrorModal(errors){
+  openModal(`
+    <div class="modal-head"><h3>Import Failed</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 10px;">This file couldn't be imported. Your current data was <b>not</b> changed.</p>
+    <div class="card" style="max-height:220px;overflow-y:auto;">
+      ${errors.slice(0,20).map(e=>`<div style="font-size:12.5px;color:var(--muted);padding:5px 0;border-top:1px solid var(--line);">${escapeHtml(e)}</div>`).join('')}
+      ${errors.length>20? `<div style="font-size:12px;color:var(--faint);padding-top:6px;">+ ${errors.length-20} more</div>` : ''}
+    </div>
+    <button class="btn btn-block" id="ieClose" style="margin-top:14px;">OK</button>
+  `, {id:'importerr', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('importerr'));
+  $('#ieClose').addEventListener('click', ()=> closeModal('importerr'));
+}
+
 function setHeaderRow(type){
   const u = unitLabel();
   const cols = {
@@ -2668,33 +3123,57 @@ function setHeaderRow(type){
     duration: ['SECONDS'],
     cardio: ['DIST', 'SEC', 'KCAL']
   }[type] || ['VALUE'];
-  return `<div class="set-hdr"><span></span>${cols.map(c=>`<span>${c}</span>`).join('')}<span></span><span></span></div>`;
+  const rpeCol = DB.settings.showRPE ? '<span>RPE</span>' : '';
+  return `<div class="set-hdr"><span></span>${cols.map(c=>`<span>${c}</span>`).join('')}${rpeCol}<span></span><span></span></div>`;
 }
 
-function setRowHtml(type, set, si, gi, ii){
+/* prevSet: this exercise's set at the same index from its most recent
+   session (or null if never performed / no set at that index). Its values
+   are shown as ghost placeholder text — visible for reference but never
+   pre-filled into the field, so it can't be mistaken for entered data and
+   never interferes with typing (see the active-workout "previous
+   performance" requirement). */
+function setRowHtml(type, set, si, gi, ii, prevSet){
   const u = unitLabel();
+  const ph = (field)=>{
+    if(!prevSet) return '';
+    if(field==='weight') return prevSet.weight!=null? fmt1(toDisplayWeight(prevSet.weight)) : '';
+    if(field==='reps') return prevSet.reps!=null? String(prevSet.reps) : '';
+    if(field==='assistWeight') return prevSet.assistWeight!=null? fmt1(toDisplayWeight(prevSet.assistWeight)) : '';
+    if(field==='durationSec') return prevSet.durationSec!=null? String(prevSet.durationSec) : '';
+    if(field==='distance') return prevSet.distance!=null? String(prevSet.distance) : '';
+    if(field==='calories') return prevSet.calories!=null? String(prevSet.calories) : '';
+    return '';
+  };
   let fields = '';
   if(type==='weight_reps'){
-    fields = `<input type="number" step="0.5" data-field="weight" placeholder="${u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
-      <input type="number" step="1" data-field="reps" placeholder="reps" value="${set.reps??''}">`;
+    fields = `<input type="number" step="0.5" data-field="weight" placeholder="${ph('weight')||u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
+      <input type="number" step="1" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='bodyweight'){
-    fields = `<input type="number" step="1" data-field="reps" placeholder="reps" value="${set.reps??''}">`;
+    fields = `<input type="number" step="1" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='assisted'){
-    fields = `<input type="number" step="0.5" data-field="assistWeight" placeholder="${u}" value="${set.assistWeight!=null?fmt1(toDisplayWeight(set.assistWeight)):''}">
-      <input type="number" step="1" data-field="reps" placeholder="reps" value="${set.reps??''}">`;
+    fields = `<input type="number" step="0.5" data-field="assistWeight" placeholder="${ph('assistWeight')||u}" value="${set.assistWeight!=null?fmt1(toDisplayWeight(set.assistWeight)):''}">
+      <input type="number" step="1" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='duration'){
-    fields = `<input type="number" step="1" data-field="durationSec" placeholder="sec" value="${set.durationSec??''}">`;
+    fields = `<input type="number" step="1" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">`;
   } else if(type==='cardio'){
-    fields = `<input type="number" step="0.1" data-field="distance" placeholder="mi/km" value="${set.distance??''}">
-      <input type="number" step="1" data-field="durationSec" placeholder="sec" value="${set.durationSec??''}">
-      <input type="number" step="1" data-field="calories" placeholder="kcal" value="${set.calories??''}">`;
+    fields = `<input type="number" step="0.1" data-field="distance" placeholder="${ph('distance')||'mi/km'}" value="${set.distance??''}">
+      <input type="number" step="1" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">
+      <input type="number" step="1" data-field="calories" placeholder="${ph('calories')||'kcal'}" value="${set.calories??''}">`;
   }
+  const rpeField = DB.settings.showRPE
+    ? `<input type="number" step="0.5" min="1" max="10" class="rpe-input" data-field="rpe" placeholder="–" value="${set.rpe??''}">`
+    : '';
   return `<div class="set-row" data-gi="${gi}" data-ii="${ii}" data-si="${si}">
     <div class="set-idx">${si+1}</div>
     ${fields}
-    <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}">${(set.tag||'W')[0]}</button>
+    ${rpeField}
+    <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}">${setTagAbbrev(set.tag)}</button>
     <div class="set-check ${set.done?'done':''}"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
   </div>`;
+}
+function setTagAbbrev(tag){
+  return {Working:'W', Warmup:'WU', Drop:'D', Failure:'F'}[tag] || 'W';
 }
 
 /* ---------------- Rest Timer ---------------- */
@@ -2859,7 +3338,6 @@ function renderSessionDetail(root){
       </table></div>`;
     }).join('')).join('')}
     ${s.notes? `<div class="card"><div class="card-title">Notes</div><p style="font-size:13.5px;margin:0;">${escapeHtml(s.notes)}</p></div>`:''}
-    ${s.photos && s.photos.length? `<div class="card"><div class="card-title">Photos</div><div class="photo-grid">${s.photos.map(p=>`<img src="${p}">`).join('')}</div></div>`:''}
   `;
   wireBack(()=> wkNav('history'));
   $('#delSess').addEventListener('click', ()=>{
@@ -2892,7 +3370,41 @@ function renderWkStats(root){
     $('#emptyStartWorkoutStats').addEventListener('click', ()=> startSession(null));
     return;
   }
+  const weekSessions = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO());
+  const weekSets = weekSessions.reduce((n,s)=> n + s.groups.reduce((m,g)=> m + g.reduce((k,e)=> k + (e.sets||[]).filter(isWorkingSet).length, 0), 0), 0);
+  const weekDurationMin = weekSessions.reduce((n,s)=> n + (s.durationMin||0), 0);
+  const monthCutoff = daysAgoISO(29);
+  const monthCount = DB.sessions.filter(s=> s.date>=monthCutoff).length;
+  const muscleGroups = muscleGroupSetCounts(THIS_WEEK_DAYS);
   root.innerHTML += `
+    <div class="card">
+      <div class="card-title">Training Overview <span class="tick">This week</span></div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sv">${weekSessions.length}</div><div class="sl">Workouts</div></div>
+        <div class="stat-box"><div class="sv">${weekSets}</div><div class="sl">Working sets</div></div>
+        <div class="stat-box"><div class="sv">${fmtInt(toDisplayWeight(weekVolume()))}</div><div class="sl">${unitLabel()} volume</div></div>
+        <div class="stat-box"><div class="sv">${Math.floor(weekDurationMin/60)}h ${weekDurationMin%60}m</div><div class="sl">Duration</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Training Consistency</div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sv">${computeStreak()}</div><div class="sl">Current streak (days)</div></div>
+        <div class="stat-box"><div class="sv">${computeBestStreak()}</div><div class="sl">Best streak (days)</div></div>
+        <div class="stat-box"><div class="sv">${weekSessions.length}</div><div class="sl">This week</div></div>
+        <div class="stat-box"><div class="sv">${monthCount}</div><div class="sl">Last 30 days</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Muscle Groups <span class="tick">This week · working sets</span></div>
+      ${muscleGroups.length? muscleGroups.map(([cat,n])=>`
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+          <div style="width:78px;font-size:11.5px;color:var(--muted-2);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.03em;">${escapeHtml(cat)}</div>
+          <div class="pbar blue" style="flex:1;"><div style="width:${clamp(n/Math.max(1,muscleGroups[0][1])*100,4,100)}%"></div></div>
+          <div class="mono" style="width:28px;text-align:right;font-size:12px;color:var(--paper);">${n}</div>
+        </div>`).join('') : `<div class="sub" style="padding:4px 0;">No working sets logged this week yet.</div>`}
+    </div>
+
     <div class="field"><label>Exercise</label>
       <select class="input" id="statExSelect">${loggedExIds.map(id=>{const e=exById(id); return `<option value="${id}" ${id===wk.statExId?'selected':''}>${e?escapeHtml(e.name):'?'}</option>`;}).join('')}</select>
     </div>
@@ -2906,7 +3418,7 @@ function renderWkStats(root){
     const volPoints=[];
     DB.sessions.forEach(s=> s.groups.forEach(g=>g.forEach(exEntry=>{
       if(exEntry.exerciseId!==wk.statExId) return;
-      let v=0; exEntry.sets.forEach(st=>{ if(st.done && st.weight!=null && st.reps!=null) v+=st.weight*st.reps; });
+      let v=0; exEntry.sets.forEach(st=>{ if(isWorkingSet(st) && st.weight!=null && st.reps!=null) v+=st.weight*st.reps; });
       if(v>0) volPoints.push({x:new Date(s.date).getTime(), y:toDisplayWeight(v)});
     })));
     $('#statBody').innerHTML = `
@@ -3035,6 +3547,7 @@ function renderDiary(root){
       <button class="btn" id="goMeals">Saved Meals</button>
       <button class="btn" id="goActivity">Activity</button>
     </div>
+    ${dayFoodLogs(date).length===0 && dayFoodLogs(shiftDate(date,-1)).length>0 ? `<button class="btn btn-block" id="repeatYesterday" style="margin-bottom:12px;">Repeat Yesterday's Log</button>` : ''}
     <div id="mealSlots"></div>
   `;
   $('#prevDay').addEventListener('click', ()=>{ nut.date = shiftDate(date,-1); renderCurrent(); });
@@ -3043,6 +3556,15 @@ function renderDiary(root){
   $('#goMeals').addEventListener('click', ()=> nutNav('meals'));
   $('#goPlanner').addEventListener('click', ()=> nutNav('planner'));
   $('#goActivity').addEventListener('click', ()=> nutNav('activity'));
+  const repeatBtn = $('#repeatYesterday');
+  if(repeatBtn) repeatBtn.addEventListener('click', ()=>{
+    // Copies yesterday's entries as brand-new log rows for today — never
+    // mutates or references yesterday's records, so editing today's copy
+    // can't retroactively change what was actually logged yesterday.
+    const yesterday = dayFoodLogs(shiftDate(date,-1));
+    yesterday.forEach(l=> DB.foodLogs.push({id:uid(), date, meal:l.meal, foodId:l.foodId, amountType:l.amountType, amount:l.amount}));
+    save(); toast(`Repeated ${yesterday.length} item(s) from yesterday`); renderCurrent();
+  });
   $$('.water-adj').forEach(b=> b.addEventListener('click', ()=>{
     const n = parseInt(b.dataset.n);
     DB.waterLogs[date] = Math.max(0,(DB.waterLogs[date]||0)+n);
@@ -3177,25 +3699,35 @@ function openFoodPicker(date, meal){
     }
 
     function foodRowHtml(f){
-      return `<div class="list-row" data-food="${f.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title" style="display:flex;align-items:center;gap:6px;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>${f.barcode?'<span class="food-badge">Barcode</span>':''}</div><div class="lr-sub">${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal · P${fmtInt(f.protein)} C${fmtInt(f.carbs)} F${fmtInt(f.fat)}</div></div></div>`;
+      return `<div class="list-row" data-food="${f.id}" style="cursor:pointer;">
+        <div class="lr-main"><div class="lr-title" style="display:flex;align-items:center;gap:6px;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>${f.barcode?'<span class="food-badge">Barcode</span>':''}</div><div class="lr-sub">${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal · P${fmtInt(f.protein)} C${fmtInt(f.carbs)} F${fmtInt(f.fat)}</div></div>
+        <button class="fav-star ${f.favorite?'on':''}" data-fav="${f.id}" title="${f.favorite?'Remove favorite':'Add favorite'}">${f.favorite?'★':'☆'}</button>
+      </div>`;
     }
     function renderFpList(){
       if(!q){
+        const favFoods = DB.foods.filter(f=> f.favorite);
         const recentIds = recentFoodIds(8);
         const freqIds = frequentFoodIds(8).filter(id=> !recentIds.includes(id));
         const recentFoods = recentIds.map(foodById).filter(Boolean);
         const freqFoods = freqIds.map(foodById).filter(Boolean);
         const rest = DB.foods.slice(0,25);
         let html = '';
-        if(recentFoods.length) html += `<div class="card-title" style="margin:2px 0 4px;">Recent</div>` + recentFoods.map(foodRowHtml).join('');
+        if(favFoods.length) html += `<div class="card-title" style="margin:2px 0 4px;">Favorites</div>` + favFoods.map(foodRowHtml).join('');
+        if(recentFoods.length) html += `<div class="card-title" style="margin:14px 0 4px;">Recent</div>` + recentFoods.map(foodRowHtml).join('');
         if(freqFoods.length) html += `<div class="card-title" style="margin:14px 0 4px;">Frequent</div>` + freqFoods.map(foodRowHtml).join('');
-        html += `<div class="card-title" style="margin:${(recentFoods.length||freqFoods.length)?14:2}px 0 4px;">All Foods</div>` + rest.map(foodRowHtml).join('');
+        html += `<div class="card-title" style="margin:${(favFoods.length||recentFoods.length||freqFoods.length)?14:2}px 0 4px;">All Foods</div>` + rest.map(foodRowHtml).join('');
         $('#fpList').innerHTML = html;
       } else {
         const filtered = DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase()));
         $('#fpList').innerHTML = filtered.map(foodRowHtml).join('') || '<div class="empty"><div class="e-title">No matches</div><div class="e-sub">Try "New Food" to add it.</div><button class="btn btn-sm btn-primary" id="fpEmptyNew" style="margin-top:10px;">+ New Food</button></div>';
       }
       $$('[data-food]').forEach(el=> el.addEventListener('click', ()=> openServingsPrompt(foodById(el.dataset.food), date, meal)));
+      $$('[data-fav]').forEach(el=> el.addEventListener('click', (ev)=>{
+        ev.stopPropagation();
+        toggleFoodFavorite(el.dataset.fav);
+        renderFpList();
+      }));
       const emptyNew = $('#fpEmptyNew');
       if(emptyNew) emptyNew.addEventListener('click', ()=>{ mode='custom'; render(); });
     }
@@ -3383,13 +3915,13 @@ function renderNutGoals(root){
   }));
   $('#gSave').addEventListener('click', ()=>{
     Object.assign(g, {
-      calories: parseFloat($('#gCal').value)||g.calories,
-      protein: parseFloat($('#gP').value)||g.protein,
-      carbs: parseFloat($('#gC').value)||g.carbs,
-      fat: parseFloat($('#gF').value)||g.fat,
-      fiber: parseFloat($('#gFib').value)||g.fiber,
-      sodium: parseFloat($('#gSod').value)||g.sodium,
-      water: parseFloat($('#gWater').value)||g.water,
+      calories: parsedOrKeep($('#gCal').value, g.calories),
+      protein: parsedOrKeep($('#gP').value, g.protein),
+      carbs: parsedOrKeep($('#gC').value, g.carbs),
+      fat: parsedOrKeep($('#gF').value, g.fat),
+      fiber: parsedOrKeep($('#gFib').value, g.fiber),
+      sodium: parsedOrKeep($('#gSod').value, g.sodium),
+      water: parsedOrKeep($('#gWater').value, g.water),
     });
     save(); toast('Goals updated'); nutNav('diary');
   });
@@ -3571,7 +4103,7 @@ renderers.progress = function(){
   const weight = weightSummary();
   const goalLine = weight.goalLbs!=null ? {y: toDisplayWeight(weight.goalLbs), label:'Goal '+fmt1(toDisplayWeight(weight.goalLbs))+' '+unitLabel(), color:'#3BD182'} : null;
   root.innerHTML = `
-    <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements, weight & photos</div></div>
+    <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
     <div class="card">
       <div class="card-title">Weight Trend</div>
       ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'#5A87F5', points:weightPoints}], {autoRange:true, refLine:goalLine})}
@@ -3589,25 +4121,11 @@ renderers.progress = function(){
       </table>
     </div>
     <div class="card">
-      <div class="card-title">Progress Photos</div>
-      <div class="photo-grid">${DB.progressPhotos.slice().reverse().map(p=>`<img src="${p.dataUrl}" title="${escapeHtml(p.date)}">`).join('') || ''}</div>
-      ${DB.progressPhotos.length===0? '<div class="sub" style="padding:8px 0;">No photos yet.</div>':''}
-      <button class="btn btn-sm" id="addProgPhoto" style="margin-top:8px;">+ Add Photo</button>
-      <input type="file" id="progPhotoInput" accept="image/*" class="hidden">
-    </div>
-    <div class="card">
       <div class="card-title">Not Connected</div>
       <div class="sub">Apple Health sync isn't available in this preview — log weight and measurements here manually. See Settings → Connected Apps.</div>
     </div>
   `;
   $('#addMeasurement').addEventListener('click', openMeasurementModal);
-  $('#addProgPhoto').addEventListener('click', ()=> $('#progPhotoInput').click());
-  $('#progPhotoInput').addEventListener('change', e=>{
-    const file = e.target.files[0]; if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ()=>{ DB.progressPhotos.push({id:uid(), date:todayISO(), dataUrl:reader.result}); save(); renderCurrent(); };
-    reader.readAsDataURL(file);
-  });
 };
 
 /* FEATURE 2: shared weight-logging helpers. Logging weight from either the quick
@@ -3664,12 +4182,12 @@ function openMeasurementModal(){
     const w = parseFloat($('#msWeight').value);
     const m = findOrCreateMeasurementForDate(todayISO());
     if(w){ m.weight = fromDisplayWeight(w); DB.settings.profile.weightLbs = m.weight; }
-    m.bodyFat = parseFloat($('#msBF').value)||m.bodyFat||null;
-    m.waist = parseFloat($('#msWaist').value)||m.waist||null;
-    m.chest = parseFloat($('#msChest').value)||m.chest||null;
-    m.hips = parseFloat($('#msHips').value)||m.hips||null;
-    m.arm = parseFloat($('#msArm').value)||m.arm||null;
-    m.thigh = parseFloat($('#msThigh').value)||m.thigh||null;
+    m.bodyFat = parsedOrKeep($('#msBF').value, m.bodyFat??null);
+    m.waist = parsedOrKeep($('#msWaist').value, m.waist??null);
+    m.chest = parsedOrKeep($('#msChest').value, m.chest??null);
+    m.hips = parsedOrKeep($('#msHips').value, m.hips??null);
+    m.arm = parsedOrKeep($('#msArm').value, m.arm??null);
+    m.thigh = parsedOrKeep($('#msThigh').value, m.thigh??null);
     save(); closeModal('ms'); toast('Measurement saved'); renderCurrent();
   });
 }
@@ -3687,6 +4205,9 @@ function openSettingsModal(){
         <div class="seg"><button data-u="lbs" class="${s.units==='lbs'?'active':''}">Imperial (lbs)</button><button data-u="kg" class="${s.units==='kg'?'active':''}">Metric (kg)</button></div>
       </div>
       <div class="field"><label>Default Rest Timer (sec)</label><input class="input" id="setRest" type="number" value="${s.restDefault}"></div>
+      <div class="field"><label>Show RPE / RIR on sets</label>
+        <div class="seg"><button data-rpe="off" class="${!s.showRPE?'active':''}">Off</button><button data-rpe="on" class="${s.showRPE?'active':''}">On</button></div>
+      </div>
       <hr class="hairline">
       <div class="card-title">Body Profile <span class="tick">for calorie calc</span></div>
       <div class="row">
@@ -3736,6 +4257,7 @@ function openSettingsModal(){
       <hr class="hairline">
       <div class="card-title">Data & Cloud Sync</div>
       <div class="sub" style="margin-bottom:10px;">All data lives in this browser. Export a backup file regularly — clearing browser data erases everything.</div>
+      <div class="sub mono" style="margin-bottom:10px;">Last saved: ${s.lastSavedAt? new Date(s.lastSavedAt).toLocaleString() : 'never'}<br>Last exported: ${s.lastExportedAt? new Date(s.lastExportedAt).toLocaleString() : 'never'}</div>
       <div class="sub" style="margin-bottom:10px;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;">Multi-account cloud sync is coming in a future version. For now all data stays on this device — use Export Backup regularly.</div>
       <div class="row" style="margin-bottom:10px;">
         <button class="btn" id="exportData">Export Backup</button>
@@ -3765,7 +4287,16 @@ function openSettingsModal(){
       pendingIntensity = b.dataset.intensity;
       $$('[data-intensity]').forEach(x=> x.classList.toggle('active', x.dataset.intensity===pendingIntensity));
     }));
-    $('#setRest').addEventListener('change', e=>{ DB.settings.restDefault = parseInt(e.target.value)||90; save(); });
+    $$('[data-rpe]').forEach(b=> b.addEventListener('click', ()=>{
+      DB.settings.showRPE = b.dataset.rpe==='on';
+      save();
+      $$('[data-rpe]').forEach(x=> x.classList.toggle('active', x.dataset.rpe===b.dataset.rpe));
+    }));
+    $('#setRest').addEventListener('change', e=>{
+      const v = parseInt(e.target.value);
+      DB.settings.restDefault = (!isNaN(v) && v>=0) ? v : 90; // explicit 0 is valid — don't || it away
+      save();
+    });
     $('#pSave').addEventListener('click', ()=>{
       const p = DB.settings.profile;
       p.heightCm = parseFloat($('#pHeight').value)||null;
@@ -3793,7 +4324,10 @@ function openSettingsModal(){
       }
     }));
     $('#exportData').addEventListener('click', ()=>{
-      const blob = new Blob([JSON.stringify(DB,null,2)], {type:'application/json'});
+      DB.settings.lastExportedAt = new Date().toISOString();
+      save();
+      const payload = { e1fitnessBackup:true, schemaVersion: DB.schemaVersion||SCHEMA_VERSION, exportedAt: DB.settings.lastExportedAt, db: DB };
+      const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href=url; a.download = 'e1fitness-backup-'+todayISO()+'.json'; a.click();
@@ -3805,12 +4339,34 @@ function openSettingsModal(){
       const file = e.target.files[0]; if(!file) return;
       const reader = new FileReader();
       reader.onload = ()=>{
-        try{
-          const parsed = JSON.parse(reader.result);
-          DB = parsed; save(); toast('Backup restored'); closeModal('settings'); rerender();
-        }catch(err){ toast('That file could not be read'); }
+        let raw;
+        try{ raw = JSON.parse(reader.result); }
+        catch(err){ openImportErrorModal(['That file is not valid JSON.']); return; }
+        // Backup files wrap the DB with metadata (schemaVersion, exportedAt); accept a
+        // bare DB object too, for backups exported before this wrapper existed.
+        const candidate = (raw && typeof raw==='object' && raw.db && raw.e1fitnessBackup) ? raw.db : raw;
+        const result = validateDB(candidate);
+        if(!result.valid){
+          openImportErrorModal(result.errors);
+          return;
+        }
+        // Safety backup of the CURRENT (pre-import) data, so a bad import can always
+        // be undone even though it already passed validation — restorable via the
+        // browser console: localStorage.getItem('e1fitness_db_v1_preimport_backup').
+        try{ localStorage.setItem(STORE_KEY+'_preimport_backup', JSON.stringify(DB)); }catch(err){ /* best-effort */ }
+        const merged = migrate(backfillDefaults(candidate));
+        DB = merged;
+        save();
+        closeModal('settings');
+        rerender();
+        toast(result.warnings.length
+          ? `Backup restored with ${result.warnings.length} minor warning(s) — see console`
+          : 'Backup restored');
+        if(result.warnings.length) console.warn('Import warnings:', result.warnings);
       };
+      reader.onerror = ()=> openImportErrorModal(['The file could not be read.']);
       reader.readAsText(file);
+      e.target.value = ''; // allow re-selecting the same file next time
     });
     $('#resetData').addEventListener('click', ()=>{
       openConfirmModal('This permanently erases every workout, food log, template, meal, measurement, photo and setting from this device. This cannot be undone.', ()=>{
