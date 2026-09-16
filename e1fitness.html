@@ -423,6 +423,10 @@ function parsedOrKeep(raw, keep){
 }
 function fmt1(n){ return (Math.round(n*10)/10).toString(); }
 function fmtInt(n){ return Math.round(n).toString(); }
+function fmtDuration(totalSec){
+  const m = Math.floor(totalSec/60), s = Math.round(totalSec%60);
+  return m+':'+s.toString().padStart(2,'0');
+}
 
 function toast(msg, opts={}){
   const t = $('#toast');
@@ -537,17 +541,42 @@ const VALID_EXERCISE_TYPES = ['weight_reps','bodyweight','assisted','duration','
    UI. `errors` are things that make the data unsafe to load (blocks import);
    `warnings` are things worth knowing about but not fatal (dangling
    references, duplicate barcodes) — surfaced in the console, not the UI. */
+/* Returns v if it's a real array, otherwise null (missing/undefined is
+   treated as "not present" -> [], but a WRONG type, e.g. a string or object
+   where an array was expected, is real corruption and must be reported).
+   Every nested "list-shaped" field below is read through this — never a
+   bare (x||[]) — so a malformed shape can never reach a bare .forEach()
+   call and throw from inside the validator itself. */
+function asList(v){
+  if(v==null) return [];
+  return Array.isArray(v) ? v : null;
+}
+
 function validateDB(data){
   const errors = [], warnings = [];
+  try{
+    return validateDBInner(data, errors, warnings);
+  }catch(e){
+    // Defense in depth: validateDBInner is written to never throw, but if an
+    // unanticipated shape slips through, fail CLOSED (reject the import)
+    // rather than let an exception escape into the caller and abort the
+    // whole import flow uncleanly.
+    console.warn('validateDB: unexpected error while validating', e);
+    return {valid:false, errors:['This backup has an unexpected internal structure and could not be safely validated.'], warnings:[]};
+  }
+}
+
+function validateDBInner(data, errors, warnings){
   if(!data || typeof data!=='object' || Array.isArray(data)){
     errors.push('File is not a valid E1FITNESS backup (not a JSON object).');
     return {valid:false, errors, warnings};
   }
   const REQUIRED_ARRAYS = ['exercises','routines','sessions','foods','foodLogs','activityLogs','meals','measurements'];
   REQUIRED_ARRAYS.forEach(k=>{ if(!Array.isArray(data[k])) errors.push(`Missing or invalid "${k}" list.`); });
-  if(!data.settings || typeof data.settings!=='object') errors.push('Missing "settings".');
-  if(data.waterLogs!=null && typeof data.waterLogs!=='object') errors.push('Invalid "waterLogs".');
-  if(data.mealPlan!=null && typeof data.mealPlan!=='object') errors.push('Invalid "mealPlan".');
+  if(!data.settings || typeof data.settings!=='object' || Array.isArray(data.settings)) errors.push('Missing or invalid "settings".');
+  if(data.waterLogs!=null && (typeof data.waterLogs!=='object' || Array.isArray(data.waterLogs))) errors.push('Invalid "waterLogs".');
+  if(data.mealPlan!=null && (typeof data.mealPlan!=='object' || Array.isArray(data.mealPlan))) errors.push('Invalid "mealPlan".');
+  if(data.activeSession!=null && (typeof data.activeSession!=='object' || Array.isArray(data.activeSession))) errors.push('Invalid "activeSession".');
   if(errors.length) return {valid:false, errors, warnings}; // can't safely inspect further without these
 
   const isNum = v => typeof v==='number' && Number.isFinite(v); // rejects NaN and ±Infinity
@@ -576,15 +605,62 @@ function validateDB(data){
     }
   });
 
+  // Shared shape check for one routine-exercise prescription (used by both
+  // saved routines and, structurally, nothing else — sessions freeze their
+  // own copy of these fields onto each entry, checked separately below).
+  function checkRoutineItem(item, where){
+    if(!item || typeof item!=='object'){ errors.push(`${where} has a malformed exercise entry.`); return; }
+    if(typeof item.exerciseId!=='string' || !item.exerciseId){ errors.push(`${where} has an exercise entry with no exerciseId.`); return; }
+    if(!exIds.has(item.exerciseId)) warnings.push(`${where} references a missing exercise.`);
+    ['targetSets','targetRepsMin','targetRepsMax','targetWeight','restSec','rpeTarget'].forEach(k=>{
+      if(item[k]!=null && !isNum(item[k])) errors.push(`${where} has a non-numeric ${k}.`);
+    });
+    if(item.restSec!=null && isNum(item.restSec) && item.restSec<0) errors.push(`${where} has a negative restSec.`);
+    if(item.targetSets!=null && isNum(item.targetSets) && item.targetSets<0) errors.push(`${where} has a negative targetSets.`);
+  }
+
   const routineIds = new Set();
   data.routines.forEach((r,i)=>{
     if(!r || typeof r!=='object' || !r.id){ errors.push(`Routine #${i} is missing an id.`); return; }
     if(routineIds.has(r.id)) errors.push(`Duplicate routine id "${r.id}".`);
     routineIds.add(r.id);
-    (r.groups||[]).forEach(g=> (g||[]).forEach(item=>{
-      if(!exIds.has(item.exerciseId)) warnings.push(`Routine "${r.name}" references a missing exercise.`);
-    }));
+    const groups = asList(r.groups);
+    if(groups===null){ errors.push(`Routine "${r.name||r.id}" has an invalid exercise-group list.`); return; }
+    groups.forEach((g,gi)=>{
+      const items = asList(g);
+      if(items===null){ errors.push(`Routine "${r.name||r.id}" has a malformed exercise group.`); return; }
+      items.forEach(item=> checkRoutineItem(item, `Routine "${r.name||r.id}" group ${gi+1}`));
+    });
   });
+
+  // Shared shape check for one logged set, valid across every exercise type
+  // (only the fields relevant to that type are ever populated).
+  function checkSet(set, where){
+    if(!set || typeof set!=='object'){ errors.push(`${where} has a malformed set.`); return; }
+    ['weight','reps','assistWeight','durationSec','distance','calories','rpe'].forEach(k=>{
+      if(set[k]!=null && !isNum(set[k])) errors.push(`${where} has a non-numeric ${k} value.`);
+    });
+    if(set.tag!=null && typeof set.tag!=='string') errors.push(`${where} has an invalid tag.`);
+  }
+  // Shared shape check for one session's exercise groups (used by both
+  // completed sessions and the in-progress activeSession).
+  function checkSessionGroups(groups, where){
+    const list = asList(groups);
+    if(list===null){ errors.push(`${where} has an invalid exercise-group list.`); return; }
+    list.forEach((g,gi)=>{
+      const entries = asList(g);
+      if(entries===null){ errors.push(`${where} has a malformed exercise group.`); return; }
+      entries.forEach((entry,ei)=>{
+        if(!entry || typeof entry!=='object'){ errors.push(`${where} group ${gi+1} has a malformed exercise entry.`); return; }
+        const entryWhere = `${where} group ${gi+1} exercise ${ei+1}`;
+        if(!exIds.has(entry.exerciseId)) warnings.push(`${entryWhere} references a missing exercise.`);
+        if(entry.exType && !VALID_EXERCISE_TYPES.includes(entry.exType)) warnings.push(`${entryWhere} has an invalid type "${entry.exType}".`);
+        const sets = asList(entry.sets);
+        if(sets===null){ errors.push(`${entryWhere} has an invalid set list.`); return; }
+        sets.forEach((set,si)=> checkSet(set, `${entryWhere} set ${si+1}`));
+      });
+    });
+  }
 
   const sessionIds = new Set();
   data.sessions.forEach((s,i)=>{
@@ -593,20 +669,13 @@ function validateDB(data){
     sessionIds.add(s.id);
     if(!validDate(s.date)) errors.push(`Session ${s.id} has an invalid date.`);
     if(s.startedAt!=null && !isNum(s.startedAt)) errors.push(`Session ${s.id} has an invalid startedAt.`);
-    (s.groups||[]).forEach(g=> (g||[]).forEach(entry=>{
-      if(!exIds.has(entry.exerciseId)) warnings.push(`Session ${s.id} references a missing exercise.`);
-      if(entry.exType && !VALID_EXERCISE_TYPES.includes(entry.exType)) warnings.push(`Session ${s.id} has an entry with invalid type "${entry.exType}".`);
-      (entry.sets||[]).forEach(set=>{
-        ['weight','reps','assistWeight','durationSec','distance','calories','rpe'].forEach(k=>{
-          if(set[k]!=null && !isNum(set[k])) errors.push(`Session ${s.id} has a non-numeric ${k} value.`);
-        });
-      });
-    }));
+    if(s.durationMin!=null && (!isNum(s.durationMin) || s.durationMin<0)) errors.push(`Session ${s.id} has an invalid durationMin.`);
+    checkSessionGroups(s.groups, `Session ${s.id}`);
   });
   if(data.activeSession){
-    (data.activeSession.groups||[]).forEach(g=> (g||[]).forEach(entry=>{
-      if(!exIds.has(entry.exerciseId)) warnings.push('Active session references a missing exercise.');
-    }));
+    const as = data.activeSession;
+    if(as.startedAt!=null && !isNum(as.startedAt)) errors.push('Active session has an invalid startedAt.');
+    checkSessionGroups(as.groups, 'Active session');
   }
 
   data.foodLogs.forEach((l,i)=>{
@@ -614,6 +683,14 @@ function validateDB(data){
     if(!foodIds.has(l.foodId)) warnings.push(`Food log ${l.id} references a missing food.`);
     if(l.amount!=null && !isNum(l.amount)) errors.push(`Food log ${l.id} has a non-numeric amount.`);
     if(!validDate(l.date)) errors.push(`Food log ${l.id} has an invalid date.`);
+  });
+
+  data.activityLogs.forEach((a,i)=>{
+    if(!a || typeof a!=='object' || !a.id){ errors.push(`Activity log #${i} is missing an id.`); return; }
+    if(!validDate(a.date)) errors.push(`Activity log ${a.id} has an invalid date.`);
+    ['minutes','calories'].forEach(k=>{
+      if(a[k]!=null && !isNum(a[k])) errors.push(`Activity log ${a.id} has a non-numeric ${k}.`);
+    });
   });
 
   data.measurements.forEach((m,i)=>{
@@ -625,6 +702,26 @@ function validateDB(data){
       else if(m[k]<0) errors.push(`Measurement ${m.id} has a negative ${k}.`);
     });
   });
+
+  // Settings: wrong-typed units/goals/profile numbers would silently produce
+  // NaN throughout the dashboard and nutrition screens (goal bars, calorie
+  // math, unit conversion) rather than failing loudly, so they're validated
+  // explicitly rather than left to "whatever backfillDefaults papers over".
+  const st = data.settings;
+  if(st.units!=null && st.units!=='lbs' && st.units!=='kg') errors.push(`Settings has an invalid units value "${st.units}".`);
+  if(st.restDefault!=null && (!isNum(st.restDefault) || st.restDefault<0)) errors.push('Settings has an invalid restDefault.');
+  if(st.goals!=null){
+    if(typeof st.goals!=='object' || Array.isArray(st.goals)) errors.push('Settings has an invalid goals object.');
+    else ['calories','protein','carbs','fat','fiber','sodium','water'].forEach(k=>{
+      if(st.goals[k]!=null && !isNum(st.goals[k])) errors.push(`Settings goals.${k} is non-numeric.`);
+    });
+  }
+  if(st.profile!=null){
+    if(typeof st.profile!=='object' || Array.isArray(st.profile)) errors.push('Settings has an invalid profile object.');
+    else ['heightCm','weightLbs','age','goalWeightLbs','activityLevel'].forEach(k=>{
+      if(st.profile[k]!=null && !isNum(st.profile[k])) errors.push(`Settings profile.${k} is non-numeric.`);
+    });
+  }
 
   return {valid: errors.length===0, errors, warnings};
 }
@@ -1578,7 +1675,7 @@ function roundWeight(n){ return Math.round(n*10)/10; }
 
 // Epley formula
 function estimate1RM(weight, reps){
-  if(!reps || reps<=0) return 0;
+  if(!Number.isFinite(weight) || !Number.isFinite(reps) || reps<=0) return 0;
   if(reps===1) return weight;
   return weight * (1 + reps/30);
 }
@@ -1838,16 +1935,24 @@ function computeDayTotals(date){
 }
 
 function estimateSessionCalories(session){
-  // rough estimate: 5 kcal/min strength, or use logged cardio calories if present
-  let mins = session.durationMin || 0;
-  let kcal = 0;
+  // rough estimate: 5.2 kcal/min for strength work, or the explicitly logged
+  // calories for cardio sets — never both for the same time. A cardio set
+  // with logged calories also "covers" its own logged duration, which is
+  // subtracted from the total session time before the flat per-minute
+  // strength estimate is applied, so that time isn't counted twice.
+  let cardioKcal = 0;
+  let coveredSec = 0;
   (session.groups||[]).forEach(g=> g.forEach(ex=>{
-    if(ex.exType==='cardio'){
-      (ex.sets||[]).forEach(s=> kcal += (s.calories||0));
-    }
+    if(ex.exType!=='cardio') return;
+    (ex.sets||[]).forEach(s=>{
+      if(!s.done || !s.calories) return; // no explicit calories logged — leave this time for the flat estimate below
+      cardioKcal += s.calories;
+      coveredSec += s.durationSec || 0;
+    });
   }));
-  kcal += mins*5.2;
-  return Math.round(kcal);
+  const totalMin = session.durationMin || 0;
+  const remainingMin = Math.max(0, totalMin - coveredSec/60);
+  return Math.round(cardioKcal + remainingMin*5.2);
 }
 
 function waterCups(date){ return DB.waterLogs[date]||0; }
@@ -1944,7 +2049,7 @@ function sessionVolume(session){
   let v=0;
   (session.groups||[]).forEach(g=>g.forEach(ex=>{
     (ex.sets||[]).forEach(s=>{
-      if(isWorkingSet(s) && s.weight!=null && s.reps!=null) v += (s.weight*s.reps);
+      if(isWorkingSet(s) && Number.isFinite(s.weight) && Number.isFinite(s.reps)) v += (s.weight*s.reps);
     });
   }));
   return v;
@@ -1994,9 +2099,13 @@ renderers.dashboard = function(){
   const water = waterCups(date);
   const waterPct = (water/goals.water)*100;
   const streak = computeStreak();
-  const todaySession = DB.sessions.find(s=>s.date===date);
-  const vol = todaySession ? sessionVolume(todaySession) : 0;
-  const volPct = clamp((vol/8000)*100,0,100) || (todaySession?100:0);
+  // A day can have more than one completed workout (e.g. an AM and a PM
+  // session) — .find() would silently show only the first and ignore the
+  // rest, so gather all of today's sessions and aggregate across them.
+  const todaySessions = DB.sessions.filter(s=>s.date===date);
+  const todaySession = todaySessions[0] || null; // kept for the single-session display case below
+  const vol = todaySessions.reduce((sum,s)=> sum + sessionVolume(s), 0);
+  const volPct = clamp((vol/8000)*100,0,100) || (todaySessions.length?100:0);
   const weight = weightSummary();
   const active = DB.activeSession;
   const suggested = suggestedRoutine();
@@ -2018,12 +2127,13 @@ renderers.dashboard = function(){
       <div class="hero-meta">Started ${Math.max(0,Math.floor((Date.now()-active.startedAt)/60000))} min ago</div>
       <button class="btn btn-primary btn-block" id="resumeWorkout" style="margin-top:13px;">Resume Workout</button>
     </div></div>`;
-  } else if(todaySession){
+  } else if(todaySessions.length){
+    const totalMin = todaySessions.reduce((sum,s)=> sum + (s.durationMin||0), 0);
     heroHtml = `<div class="hero-card"><div class="hero-card-in">
       <div class="hero-eyebrow" style="color:var(--green);">Done for today</div>
-      <div class="hero-title">${escapeHtml(todaySession.routineName)}</div>
-      <div class="hero-meta">${todaySession.durationMin||'—'} min · ${fmtInt(toDisplayWeight(vol))} ${unitLabel()} volume logged</div>
-      <button class="btn btn-block" id="viewTodaySession" style="margin-top:13px;">View Workout</button>
+      <div class="hero-title">${todaySessions.length>1? todaySessions.length+' Workouts Completed' : escapeHtml(todaySession.routineName)}</div>
+      <div class="hero-meta">${totalMin||'—'} min · ${fmtInt(toDisplayWeight(vol))} ${unitLabel()} volume logged</div>
+      <button class="btn btn-block" id="viewTodaySession" style="margin-top:13px;">${todaySessions.length>1? 'View Workouts' : 'View Workout'}</button>
     </div></div>`;
   } else if(suggested){
     const st = templateStats(suggested.id);
@@ -2071,7 +2181,7 @@ renderers.dashboard = function(){
       <div class="gauge-row">
         ${gaugeBlock(calPct, fmtInt(remaining), 'KCAL LEFT', 'Calories', 'var(--ember)')}
         ${gaugeBlock(waterPct, water+'/'+goals.water, 'CUPS', 'Water', 'var(--blue)')}
-        ${gaugeBlock(volPct, todaySession? fmtInt(vol): '0', 'LB·REPS', todaySession? 'Logged':'No workout', 'var(--green)')}
+        ${gaugeBlock(volPct, todaySessions.length? fmtInt(toDisplayWeight(vol)): '0', unitLabel().toUpperCase()+'·REPS', todaySessions.length? 'Logged':'No workout', 'var(--green)')}
       </div>
     </div>
 
@@ -2106,7 +2216,7 @@ renderers.dashboard = function(){
     <div class="card">
       <div class="card-title">This Week</div>
       <div class="stat-grid">
-        <div class="stat-box"><div class="sv">${fmtInt(weekVolume())}</div><div class="sl">${unitLabel()}·reps volume</div></div>
+        <div class="stat-box"><div class="sv">${fmtInt(toDisplayWeight(weekVolume()))}</div><div class="sl">${unitLabel()}·reps volume</div></div>
         <div class="stat-box"><div class="sv">${DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length}</div><div class="sl">Workouts logged</div></div>
       </div>
     </div>
@@ -2129,7 +2239,13 @@ renderers.dashboard = function(){
   const resumeBtn = $('#resumeWorkout');
   if(resumeBtn) resumeBtn.addEventListener('click', ()=>{ wk.view='active-session'; setTab('workout'); });
   const viewTodayBtn = $('#viewTodaySession');
-  if(viewTodayBtn) viewTodayBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('session-detail', {historyDate: todaySession.id}); });
+  if(viewTodayBtn) viewTodayBtn.addEventListener('click', ()=>{
+    setTab('workout');
+    // Multiple sessions today -> there's no single one to jump to, so show
+    // the list (History) rather than silently picking just one of them.
+    if(todaySessions.length>1) wkNav('history');
+    else wkNav('session-detail', {historyDate: todaySession.id});
+  });
   const startSuggestedBtn = $('#startSuggested');
   if(startSuggestedBtn) startSuggestedBtn.addEventListener('click', ()=>{ setTab('workout'); startSession(suggested.id); });
   const heroRoutinesBtn = $('#heroRoutines');
@@ -2384,42 +2500,120 @@ function renderExDetail(root){
     <div class="card">
       <div class="card-title">Personal Records</div>
       <div class="stat-grid">
-        <div class="stat-box"><div class="sv">${prs.maxWeight? fmt1(toDisplayWeight(prs.maxWeight))+' '+unitLabel():'—'}</div><div class="sl">Max Weight</div></div>
-        <div class="stat-box"><div class="sv">${prs.best1RM? fmt1(toDisplayWeight(prs.best1RM))+' '+unitLabel():'—'}</div><div class="sl">Est. 1RM</div></div>
-        <div class="stat-box"><div class="sv">${prs.maxVolume? fmtInt(toDisplayWeight(prs.maxVolume)):'—'}</div><div class="sl">Best Session Volume</div></div>
-        <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>
+        ${prStatBoxesHtml(e.type, prs)}
       </div>
     </div>
-    <div class="card">
-      <div class="card-title">1RM Progression</div>
-      ${lineChartSVG([{label:'Est. 1RM', color:'#5A87F5', points:prs.oneRMPoints.map(p=>({x:new Date(p.date).getTime(), y:toDisplayWeight(p.value)}))}])}
-    </div>
+    ${prChartHtml(e.type, prs)}
   `;
   wireBack(()=> wkNav('library'));
 }
 
+/* Type-appropriate Personal Records stat boxes — see the exercise-type PR
+   audit: a weight-based "PR" is meaningless for bodyweight/assisted/duration/
+   cardio exercises, so each type gets only the metrics that make sense for
+   it rather than a wall of "—" placeholders. */
+function prStatBoxesHtml(type, prs){
+  if(type==='weight_reps'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxWeight? fmt1(toDisplayWeight(prs.maxWeight))+' '+unitLabel():'—'}</div><div class="sl">Max Weight</div></div>
+      <div class="stat-box"><div class="sv">${prs.best1RM? fmt1(toDisplayWeight(prs.best1RM))+' '+unitLabel():'—'}</div><div class="sl">Est. 1RM</div></div>
+      <div class="stat-box"><div class="sv">${prs.maxVolume? fmtInt(toDisplayWeight(prs.maxVolume)):'—'}</div><div class="sl">Best Session Volume</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='bodyweight'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxReps? prs.maxReps : '—'}</div><div class="sl">Best Reps</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='assisted'){
+    // Lower assistance = harder = the actual improvement, so this is never
+    // framed as a "max" the way a weight_reps PR is.
+    return `
+      <div class="stat-box"><div class="sv">${prs.minAssistWeight!=null? fmt1(toDisplayWeight(prs.minAssistWeight))+' '+unitLabel():'—'}</div><div class="sl">Least Assistance</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='duration'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxDuration? fmtDuration(prs.maxDuration) : '—'}</div><div class="sl">Best Hold</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='cardio'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxDistance? fmt1(prs.maxDistance) : '—'}</div><div class="sl">Best Distance</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  return `<div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+}
+/* Type-appropriate progression chart — an empty/misleading "1RM Progression"
+   chart for a plank or a jog is worse than no chart at all. */
+function prChartHtml(type, prs){
+  if(type==='weight_reps'){
+    return `<div class="card"><div class="card-title">Est. 1RM Progression</div>${lineChartSVG([{label:'Est. 1RM ('+unitLabel()+')', color:'#5A87F5', points:prs.oneRMPoints.map(p=>({x:new Date(p.date).getTime(), y:toDisplayWeight(p.value)}))}])}</div>`;
+  }
+  if(type==='bodyweight'){
+    return `<div class="card"><div class="card-title">Best Reps Progression</div>${lineChartSVG([{label:'Reps', color:'#3BD182', points:prs.repPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
+  }
+  if(type==='duration'){
+    return `<div class="card"><div class="card-title">Best Hold Progression</div>${lineChartSVG([{label:'Seconds', color:'#F59A4B', points:prs.durationPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
+  }
+  if(type==='cardio'){
+    return prs.distancePoints.length ? `<div class="card"><div class="card-title">Best Distance Progression</div>${lineChartSVG([{label:'Distance', color:'#5A87F5', points:prs.distancePoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>` : '';
+  }
+  return ''; // assisted: a "lower is better" trend doesn't fit the standard chart — the stat box above is enough
+}
+
+/* PRs/stats are computed per the exercise TYPE the set was actually logged
+   under (exEntry.exType, frozen at logging time) rather than guessed from
+   which fields happen to be non-null — see the exercise-type PR audit:
+   - weight_reps: max weight, est. 1RM (Epley), session volume.
+   - bodyweight: best single-set reps (no external load, so no 1RM/weight PR).
+   - assisted: least assistance weight used (LOWER is the improvement here —
+     it means less help needed — so it is never treated as a weight "PR").
+   - duration: longest hold/time.
+   - cardio: longest single-set distance, where logged.
+   Warm-up sets never contribute (isWorkingSet excludes them), so they can
+   never inflate volume, 1RM or any of the type-specific bests. */
 function computePRs(exerciseId){
   let maxWeight=0, best1RM=0, maxVolume=0, count=0;
-  const oneRMPoints=[];
+  let maxReps=0, minAssistWeight=null, maxDuration=0, maxDistance=0;
+  const oneRMPoints=[], repPoints=[], durationPoints=[], distancePoints=[];
   DB.sessions.forEach(s=>{
     (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
       if(exEntry.exerciseId!==exerciseId) return;
-      let sessionVol=0; let sessionBest1RM=0; let did=false;
+      let sessionVol=0, sessionBest1RM=0, sessionMaxReps=0, sessionMaxDuration=0, sessionMaxDistance=0;
+      let did=false;
       (exEntry.sets||[]).forEach(set=>{
         if(!isWorkingSet(set)) return;
         did=true;
-        if(set.weight!=null && set.reps!=null){
-          maxWeight = Math.max(maxWeight, set.weight);
-          const orm = estimate1RM(set.weight, set.reps);
-          best1RM = Math.max(best1RM, orm);
-          sessionBest1RM = Math.max(sessionBest1RM, orm);
-          sessionVol += set.weight*set.reps;
+        if(exEntry.exType==='weight_reps'){
+          if(Number.isFinite(set.weight) && Number.isFinite(set.reps)){
+            maxWeight = Math.max(maxWeight, set.weight);
+            const orm = estimate1RM(set.weight, set.reps);
+            best1RM = Math.max(best1RM, orm);
+            sessionBest1RM = Math.max(sessionBest1RM, orm);
+            sessionVol += set.weight*set.reps;
+          }
+        } else if(exEntry.exType==='bodyweight'){
+          if(Number.isFinite(set.reps)){ maxReps = Math.max(maxReps, set.reps); sessionMaxReps = Math.max(sessionMaxReps, set.reps); }
+        } else if(exEntry.exType==='assisted'){
+          if(Number.isFinite(set.assistWeight)) minAssistWeight = minAssistWeight==null ? set.assistWeight : Math.min(minAssistWeight, set.assistWeight);
+        } else if(exEntry.exType==='duration'){
+          if(Number.isFinite(set.durationSec)){ maxDuration = Math.max(maxDuration, set.durationSec); sessionMaxDuration = Math.max(sessionMaxDuration, set.durationSec); }
+        } else if(exEntry.exType==='cardio'){
+          if(Number.isFinite(set.distance)){ maxDistance = Math.max(maxDistance, set.distance); sessionMaxDistance = Math.max(sessionMaxDistance, set.distance); }
         }
       });
-      if(did){ count++; maxVolume=Math.max(maxVolume, sessionVol); if(sessionBest1RM>0) oneRMPoints.push({date:s.date, value:sessionBest1RM}); }
+      if(did){
+        count++;
+        maxVolume=Math.max(maxVolume, sessionVol);
+        if(sessionBest1RM>0) oneRMPoints.push({date:s.date, value:sessionBest1RM});
+        if(sessionMaxReps>0) repPoints.push({date:s.date, value:sessionMaxReps});
+        if(sessionMaxDuration>0) durationPoints.push({date:s.date, value:sessionMaxDuration});
+        if(sessionMaxDistance>0) distancePoints.push({date:s.date, value:sessionMaxDistance});
+      }
     }));
   });
-  return {maxWeight, best1RM, maxVolume, count, oneRMPoints};
+  return {maxWeight, best1RM, maxVolume, count, oneRMPoints, maxReps, repPoints, minAssistWeight, maxDuration, durationPoints, maxDistance, distancePoints};
 }
 
 /* Real-time PR toast, fired the instant a set is checked off — not just at
@@ -3004,7 +3198,10 @@ function renderActiveSession(root){
       const [gi,ii] = b.dataset.addset.split(':').map(Number);
       const entry = s.groups[gi][ii];
       const last = entry.sets[entry.sets.length-1];
-      entry.sets.push(last? {...last, done:false} : blankSetForType(entry.exType));
+      // Copy weight/reps/etc. from the previous set as a starting point, but a
+      // new set is always an un-done "Working" set — it must never silently
+      // inherit Warmup/Drop/Failure from whatever the last set happened to be.
+      entry.sets.push(last? {...last, done:false, tag:'Working'} : blankSetForType(entry.exType));
       save(); renderExBlocks(); renderSessionStats();
     }));
     $$('[data-restcfg]').forEach(b=> b.addEventListener('click', ()=>{
@@ -3414,25 +3611,26 @@ function renderWkStats(root){
   $('#statExSelect').addEventListener('change', e=>{ wk.statExId=e.target.value; renderBody(); });
   renderBody();
   function renderBody(){
+    const ex = exById(wk.statExId);
+    const type = ex ? ex.type : 'weight_reps';
     const prs = computePRs(wk.statExId);
     const volPoints=[];
-    DB.sessions.forEach(s=> s.groups.forEach(g=>g.forEach(exEntry=>{
-      if(exEntry.exerciseId!==wk.statExId) return;
-      let v=0; exEntry.sets.forEach(st=>{ if(isWorkingSet(st) && st.weight!=null && st.reps!=null) v+=st.weight*st.reps; });
-      if(v>0) volPoints.push({x:new Date(s.date).getTime(), y:toDisplayWeight(v)});
-    })));
+    if(type==='weight_reps'){
+      DB.sessions.forEach(s=> s.groups.forEach(g=>g.forEach(exEntry=>{
+        if(exEntry.exerciseId!==wk.statExId) return;
+        let v=0; exEntry.sets.forEach(st=>{ if(isWorkingSet(st) && st.weight!=null && st.reps!=null) v+=st.weight*st.reps; });
+        if(v>0) volPoints.push({x:new Date(s.date).getTime(), y:toDisplayWeight(v)});
+      })));
+    }
     $('#statBody').innerHTML = `
       <div class="card">
         <div class="card-title">Personal Records</div>
         <div class="stat-grid">
-          <div class="stat-box"><div class="sv">${prs.maxWeight?fmt1(toDisplayWeight(prs.maxWeight)):'—'}</div><div class="sl">Max Weight (${unitLabel()})</div></div>
-          <div class="stat-box"><div class="sv">${prs.best1RM?fmt1(toDisplayWeight(prs.best1RM)):'—'}</div><div class="sl">Est. 1RM (${unitLabel()})</div></div>
-          <div class="stat-box"><div class="sv">${prs.maxVolume?fmtInt(toDisplayWeight(prs.maxVolume)):'—'}</div><div class="sl">Best Volume</div></div>
-          <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Sessions</div></div>
+          ${prStatBoxesHtml(type, prs)}
         </div>
       </div>
-      <div class="card"><div class="card-title">Volume Progression</div>${lineChartSVG([{label:'Volume', color:'#F59A4B', points:volPoints}])}</div>
-      <div class="card"><div class="card-title">Est. 1RM Progression</div>${lineChartSVG([{label:'1RM', color:'#5A87F5', points:prs.oneRMPoints.map(p=>({x:new Date(p.date).getTime(), y:toDisplayWeight(p.value)}))}])}</div>
+      ${type==='weight_reps'? `<div class="card"><div class="card-title">Volume Progression</div>${lineChartSVG([{label:'Volume', color:'#F59A4B', points:volPoints}])}</div>` : ''}
+      ${prChartHtml(type, prs)}
     `;
   }
 }
@@ -4354,7 +4552,18 @@ function openSettingsModal(){
         // be undone even though it already passed validation — restorable via the
         // browser console: localStorage.getItem('e1fitness_db_v1_preimport_backup').
         try{ localStorage.setItem(STORE_KEY+'_preimport_backup', JSON.stringify(DB)); }catch(err){ /* best-effort */ }
-        const merged = migrate(backfillDefaults(candidate));
+        // Defense in depth: validateDB() already rejects malformed shapes, but
+        // migrate()/backfillDefaults() run on a deep-cloned candidate first —
+        // if anything in that step throws for an unforeseen reason, the live
+        // DB must never end up partially replaced.
+        let merged;
+        try{
+          merged = migrate(backfillDefaults(JSON.parse(JSON.stringify(candidate))));
+        }catch(err){
+          console.warn('Import failed while applying migrations', err);
+          openImportErrorModal(['This backup passed initial checks but could not be loaded safely. Your current data was not changed.']);
+          return;
+        }
         DB = merged;
         save();
         closeModal('settings');
