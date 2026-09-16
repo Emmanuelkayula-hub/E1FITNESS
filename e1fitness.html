@@ -2081,15 +2081,18 @@ function suggestedRoutine(){
 function recentActivityHtml(){
   const items = [];
   [...DB.sessions].sort((a,b)=>b.startedAt-a.startedAt).slice(0,3).forEach(s=>{
-    items.push({sortKey:s.startedAt, bg:'var(--blue-dim)', fg:'var(--blue-tint)', icon:'W', title:s.routineName, sub:(s.durationMin||'—')+' min · '+fmtInt(toDisplayWeight(sessionVolume(s)))+' '+unitLabel()+' vol', when:dateLabel(s.date)});
+    items.push({sortKey:s.startedAt, bg:'var(--blue-dim)', fg:'var(--blue-tint)', icon:'W', title:s.routineName, sub:(s.durationMin||'—')+' min · '+fmtInt(toDisplayWeight(sessionVolume(s)))+' '+unitLabel()+' vol', when:dateLabel(s.date), kind:'session', sessId:s.id});
   });
   [...DB.activityLogs].slice(-3).forEach((a,i)=>{
-    items.push({sortKey: new Date(a.date).getTime()+i, bg:'var(--surface-3)', fg:'var(--ember)', icon:'A', title:a.label, sub:a.minutes+' min · '+a.calories+' kcal', when:dateLabel(a.date)});
+    items.push({sortKey: new Date(a.date).getTime()+i, bg:'var(--surface-3)', fg:'var(--ember)', icon:'A', title:a.label, sub:a.minutes+' min · '+a.calories+' kcal', when:dateLabel(a.date), kind:'activity', actDate:a.date});
   });
   items.sort((a,b)=>b.sortKey-a.sortKey);
   const top = items.slice(0,4);
   if(top.length===0) return `<div class="sub" style="padding:4px 0;">Nothing logged yet — finish a workout or log activity to see it here.</div>`;
-  return top.map(r=>`<div class="list-row" style="border-top:1px solid var(--line);border-bottom:none;padding:11px 0;">
+  // Recent items are tappable: a workout jumps straight to its session detail,
+  // an activity log jumps to the Fuel Activity screen for that day — so
+  // "Recent" is a shortcut back into what you logged, not just a readout.
+  return top.map(r=>`<div class="list-row" data-recent="${r.kind}" data-recent-sess="${r.sessId||''}" data-recent-date="${r.actDate||''}" style="border-top:1px solid var(--line);border-bottom:none;padding:11px 0;cursor:pointer;">
     <div style="width:34px;height:34px;border-radius:10px;background:${r.bg};display:flex;align-items:center;justify-content:center;flex:none;font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;color:${r.fg};letter-spacing:.04em;">${r.icon}</div>
     <div class="lr-main"><div class="lr-title">${escapeHtml(r.title)}</div><div class="lr-sub">${escapeHtml(r.sub)}</div></div>
     <div class="mono" style="font-size:11.5px;color:var(--faint-2);flex:none;">${escapeHtml(r.when)}</div>
@@ -2185,6 +2188,8 @@ renderers.dashboard = function(){
 
     ${heroHtml}
 
+    <button class="btn btn-ember btn-block" id="qsFood" style="margin-bottom:12px;">Log Food</button>
+
     <div class="card">
       <div class="card-title">Daily Console <span class="tick">${escapeHtml(date)}</span></div>
       <div class="gauge-row">
@@ -2217,15 +2222,10 @@ renderers.dashboard = function(){
       <button class="btn btn-primary btn-block" id="logWeightBtn" style="margin-top:10px;">Log Today's Weight</button>
     </div>
 
-    <div class="row" style="margin-bottom:12px;">
-      <button class="btn btn-primary" id="qsWorkout">Start Workout</button>
-      <button class="btn btn-ember" id="qsFood">Log Food</button>
-    </div>
-
     <div class="card">
       <div class="card-title">This Week</div>
       <div class="stat-grid">
-        <div class="stat-box"><div class="sv">${fmtInt(toDisplayWeight(weekVolume()))}</div><div class="sl">${unitLabel()}·reps volume</div></div>
+        <div class="stat-box"><div class="sv">${fmtInt(toDisplayWeight(weekVolume()))} ${unitLabel()}</div><div class="sl">Volume</div></div>
         <div class="stat-box"><div class="sv">${DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length}</div><div class="sl">Workouts logged</div></div>
       </div>
     </div>
@@ -2242,7 +2242,6 @@ renderers.dashboard = function(){
       ${recentActivityHtml()}
     </div>
   `;
-  $('#qsWorkout').addEventListener('click', ()=> setTab('workout'));
   $('#qsFood').addEventListener('click', ()=> { setTab('nutrition'); openFoodPicker(todayISO(),'Snacks'); });
   $('#logWeightBtn').addEventListener('click', openQuickWeightModal);
   const resumeBtn = $('#resumeWorkout');
@@ -2270,6 +2269,16 @@ renderers.dashboard = function(){
   $$('.day-pill').forEach(p=> p.addEventListener('click', ()=>{
     nut.date = p.dataset.day;
     setTab('nutrition');
+  }));
+  $$('[data-recent]').forEach(el=> el.addEventListener('click', ()=>{
+    if(el.dataset.recent==='session' && el.dataset.recentSess){
+      setTab('workout');
+      wkNav('session-detail', {historyDate: el.dataset.recentSess});
+    } else if(el.dataset.recent==='activity'){
+      if(el.dataset.recentDate) nut.date = el.dataset.recentDate;
+      setTab('nutrition');
+      nutNav('activity');
+    }
   }));
 };
 
@@ -2397,15 +2406,37 @@ function wireBack(fn){
 }
 
 function renderWorkoutHome(root){
+  // Note: if a workout is already active, renderers.workout() redirects to
+  // the active-session view before this function is ever reached — so
+  // "resume" doesn't need its own entry point here, this screen only shows
+  // when there's nothing in progress. Hierarchy from here down: a useful
+  // suggested/repeat template first, then Start Empty Workout, then the
+  // full template list, then secondary tools.
+  const suggested = suggestedRoutine();
+  let suggestedHtml = '';
+  if(suggested){
+    const st = templateStats(suggested.id);
+    suggestedHtml = `
+    <div class="card" style="border-color:var(--blue-line);">
+      <div class="card-title">${st.lastDate? 'Repeat' : 'Suggested'} <span class="tick">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Not done yet'}</span></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div style="min-width:0;">
+          <div style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:17px;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(suggested.name)}</div>
+          <div class="sub" style="margin-top:2px;">${suggested.groups.length} exercise${suggested.groups.length!==1?'s':''}</div>
+        </div>
+        <button class="btn btn-primary" id="startSuggestedHome" style="flex:none;">Start</button>
+      </div>
+    </div>`;
+  }
   root.innerHTML = `
     <div class="screen-head">
-      <h1>Workout</h1>
-      <div class="sub">Simple logging, serious numbers.</div>
+      <h1>Train</h1>
+      <div class="sub">Start a workout and log it as you go.</div>
     </div>
 
-    <div class="row" style="margin-bottom:12px;">
-      <button class="btn btn-primary" id="quickStart">Quick Start (Empty)</button>
-    </div>
+    ${suggestedHtml}
+
+    <button class="btn ${suggested?'':'btn-primary'} btn-block" id="quickStart" style="margin-bottom:14px;">Start Empty Workout</button>
 
     <div class="card" id="goRoutines" style="cursor:pointer;">
       <div class="card-title">My Templates <span class="tick">${DB.routines.length}</span></div>
@@ -2416,14 +2447,16 @@ function renderWorkoutHome(root){
     </div>
 
     <div class="row" style="margin-bottom:12px;">
-      <button class="btn" id="goLibrary">Exercise Library</button>
+      <button class="btn" id="goHistory">History</button>
       <button class="btn" id="goStats">Stats & PRs</button>
     </div>
     <div class="row" style="margin-bottom:12px;">
-      <button class="btn" id="goHistory">History</button>
+      <button class="btn" id="goLibrary">Exercise Library</button>
       <button class="btn" id="goCalc">Calculators</button>
     </div>
   `;
+  const startSuggestedHomeBtn = $('#startSuggestedHome');
+  if(startSuggestedHomeBtn) startSuggestedHomeBtn.addEventListener('click', ()=> startSession(suggested.id));
   $('#goRoutines').addEventListener('click', (e)=>{ if(!e.target.closest('[data-tmpl]') && !e.target.closest('#emptyNewTemplate')) wkNav('routines'); });
   $$('[data-tmpl]').forEach(el=> el.addEventListener('click', (e)=>{ e.stopPropagation(); wkNav('template-detail', {routineId:el.dataset.tmpl}); }));
   const emptyNewTemplate = $('#emptyNewTemplate');
@@ -3098,16 +3131,21 @@ function renderActiveSession(root){
   if(!s){ wkNav('home'); return; }
   const elapsedMin = Math.floor((Date.now()-s.startedAt)/60000);
   const flat = sessionExerciseList(s);
+  // "Current" exercise = the first one that isn't fully done yet — a simple,
+  // always-available stand-in for position in a multi-exercise workout,
+  // without needing to track/redesign this into a one-at-a-time view.
+  const currentIdx = flat.length ? (flat.findIndex(f=> !(f.entry.sets.length>0 && f.entry.sets.every(st=>st.done))) ) : -1;
+  const effectiveCurrentIdx = currentIdx===-1 ? flat.length-1 : currentIdx;
   root.innerHTML = `
     <div class="screen-head" style="display:flex;align-items:center;gap:10px;">
       <button class="icon-btn" id="cancelSession"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
-      <div style="flex:1;"><h1 style="font-size:19px;">${escapeHtml(s.routineName)}</h1><div class="sub mono" id="elapsedText">${elapsedMin} min elapsed</div></div>
+      <div style="flex:1;"><h1 style="font-size:19px;">${escapeHtml(s.routineName)}</h1><div class="sub mono" id="elapsedText"><span id="elapsedMinPart">${elapsedMin} min elapsed</span>${flat.length>1? ' · Exercise '+(effectiveCurrentIdx+1)+' of '+flat.length : ''}</div></div>
       <button class="btn btn-primary btn-sm" id="finishSession">Finish</button>
     </div>
     ${flat.length>1 ? `<div class="ex-pager">${flat.map((f,i)=>{
       const e = exById(f.entry.exerciseId);
       const allDone = f.entry.sets.length>0 && f.entry.sets.every(st=>st.done);
-      return `<button data-jump="ex-${f.gi}-${f.ii}"><span class="pn">${i+1}</span>${escapeHtml(e?e.name:'?').slice(0,16)}${allDone?`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke-width="3.4" stroke-linecap="round"><path d="M5 13l4.5 4.5L19 7"/></svg>`:''}</button>`;
+      return `<button data-jump="ex-${f.gi}-${f.ii}" class="${i===effectiveCurrentIdx?'cur':''}"><span class="pn">${i+1}</span>${escapeHtml(e?e.name:'?').slice(0,16)}${allDone?`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke-width="3.4" stroke-linecap="round"><path d="M5 13l4.5 4.5L19 7"/></svg>`:''}</button>`;
     }).join('')}</div>` : ''}
     <div id="exBlocks"></div>
     <button class="btn btn-block" id="addExToSession" style="margin-bottom:10px;">+ Add Exercise</button>
@@ -3464,7 +3502,7 @@ let elapsedTimerInterval = null;
 function startElapsedTimer(startedAt){
   stopElapsedTimer();
   elapsedTimerInterval = setInterval(()=>{
-    const el = $('#elapsedText');
+    const el = $('#elapsedMinPart');
     if(!el || !DB.activeSession){ stopElapsedTimer(); return; }
     const mins = Math.floor((Date.now()-startedAt)/60000);
     el.textContent = mins+' min elapsed';
@@ -4294,7 +4332,7 @@ function renderActivityLog(root){
     </div>
     <div class="card">
       <div class="card-title">Not Connected</div>
-      <div class="sub">Wear OS, Apple Health, Fitbit, Garmin and Google Fit sync aren't available in this preview — activity here is entered manually. See Settings → Connected Apps.</div>
+      <div class="sub">Wear OS, Apple Health, Fitbit, Garmin and Google Fit sync aren't available in this preview — activity here is entered manually. See Settings → Connections.</div>
     </div>
   `;
   wireBack(()=> nutNav('diary'));
@@ -4338,10 +4376,6 @@ renderers.progress = function(){
       <table class="dtable"><tr><th>Date</th><th>Wt</th><th>BF%</th><th>Waist</th></tr>
       ${[...sorted].reverse().slice(0,10).map(m=>`<tr><td>${dateLabel(m.date)}</td><td>${m.weight!=null?fmt1(toDisplayWeight(m.weight)):'-'}</td><td>${m.bodyFat??'-'}</td><td>${m.waist??'-'}</td></tr>`).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--muted);font-family:'Figtree',sans-serif;">No entries yet</td></tr>`}
       </table>
-    </div>
-    <div class="card">
-      <div class="card-title">Not Connected</div>
-      <div class="sub">Apple Health sync isn't available in this preview — log weight and measurements here manually. See Settings → Connected Apps.</div>
     </div>
   `;
   $('#addMeasurement').addEventListener('click', openMeasurementModal);
@@ -4420,6 +4454,7 @@ function openSettingsModal(){
     const s = DB.settings;
     const html = `
       <div class="modal-head"><h3>Settings</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="card-title">Preferences</div>
       <div class="field"><label>Units</label>
         <div class="seg"><button data-u="lbs" class="${s.units==='lbs'?'active':''}">Imperial (lbs)</button><button data-u="kg" class="${s.units==='kg'?'active':''}">Metric (kg)</button></div>
       </div>
@@ -4428,7 +4463,7 @@ function openSettingsModal(){
         <div class="seg"><button data-rpe="off" class="${!s.showRPE?'active':''}">Off</button><button data-rpe="on" class="${s.showRPE?'active':''}">On</button></div>
       </div>
       <hr class="hairline">
-      <div class="card-title">Body Profile <span class="tick">for calorie calc</span></div>
+      <div class="card-title">Profile & Goals <span class="tick">for calorie calc</span></div>
       <div class="row">
         <div class="field"><label>Height (cm)</label><input class="input" id="pHeight" type="number" value="${s.profile.heightCm??''}"></div>
         <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="pWeight" type="number" value="${s.profile.weightLbs? fmt1(toDisplayWeight(s.profile.weightLbs)) : ''}"></div>
@@ -4467,14 +4502,14 @@ function openSettingsModal(){
       <button class="btn btn-block" id="pSave">Save Profile</button>
       <div id="bmrResult" style="margin-top:10px;"></div>
       <hr class="hairline">
-      <div class="card-title">Connected Apps <span class="tick">Preview</span></div>
+      <div class="card-title">Connections <span class="tick">Preview</span></div>
       <div class="sub" style="margin-bottom:10px;">These require accounts and APIs this preview can't reach, so they're shown off by default.</div>
       ${Object.entries({appleHealth:'Apple Health', wearOS:'Wear OS', googleFit:'Google Fit', fitbit:'Fitbit', garmin:'Garmin', grocery:'Grocery Delivery'}).map(([k,label])=>`
         <div class="list-row"><div class="lr-main"><div class="lr-title">${label}</div><div class="lr-sub">${s.connectedApps[k]?'Connected':'Not connected'}</div></div>
         <button class="btn btn-sm ${s.connectedApps[k]?'btn-ghost':''}" data-conn="${k}">${s.connectedApps[k]?'Disconnect':'Connect'}</button></div>
       `).join('')}
       <hr class="hairline">
-      <div class="card-title">Data & Cloud Sync</div>
+      <div class="card-title">Data</div>
       <div class="sub" style="margin-bottom:10px;">All data lives in this browser. Export a backup file regularly — clearing browser data erases everything.</div>
       <div class="sub mono" style="margin-bottom:10px;">Last saved: ${s.lastSavedAt? new Date(s.lastSavedAt).toLocaleString() : 'never'}<br>Last exported: ${s.lastExportedAt? new Date(s.lastExportedAt).toLocaleString() : 'never'}</div>
       <div class="sub" style="margin-bottom:10px;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;">Multi-account cloud sync is coming in a future version. For now all data stays on this device — use Export Backup regularly.</div>
@@ -4599,7 +4634,7 @@ function openSettingsModal(){
       e.target.value = ''; // allow re-selecting the same file next time
     });
     $('#resetData').addEventListener('click', ()=>{
-      openConfirmModal('This permanently erases every workout, food log, template, meal, measurement, photo and setting from this device. This cannot be undone.', ()=>{
+      openConfirmModal('This permanently erases every workout, food log, template, meal, measurement and setting from this device. This cannot be undone.', ()=>{
         DB = defaultDB(); seedData(DB); save(); closeModal('settings'); rerender(); toast('All data erased');
       }, {title:'Erase All Data?', confirmLabel:'Erase Everything', danger:true});
     });
