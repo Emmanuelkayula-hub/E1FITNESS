@@ -273,6 +273,8 @@ textarea.input{resize:vertical;min-height:70px;}
 .set-row .set-check.done svg{stroke:#08130D;}
 .set-row .set-tagbtn{width:34px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted);font-size:9.5px;flex-shrink:0;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
 .set-row .rpe-input{flex:none !important;width:38px !important;min-width:38px;font-size:13px !important;padding:12px 0 !important;}
+.set-row .set-del{width:28px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted-2);flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+.set-row .set-del:disabled{opacity:.32;}
 
 .exercise-block{background:var(--surface);border:1px solid var(--line-2);border-radius:17px;padding:0;margin-bottom:12px;overflow:hidden;}
 .exercise-block .ex-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:15px 15px 12px;}
@@ -3179,7 +3181,7 @@ function renderActiveSession(root){
   startElapsedTimer(s.startedAt);
   $('#cancelSession').addEventListener('click', ()=>{
     openConfirmModal('This will permanently discard this workout — nothing will be saved.', ()=>{
-      stopElapsedTimer(); DB.activeSession=null; save(); wkNav('home');
+      stopElapsedTimer(); stopRestTimer(); DB.activeSession=null; save(); wkNav('home');
     }, {title:'Discard Workout?', confirmLabel:'Discard', danger:true});
   });
   $('#finishSession').addEventListener('click', finishActiveSession);
@@ -3312,6 +3314,20 @@ function renderActiveSession(root){
         save();
         renderSessionStats(); // warm-up/working toggles change what counts toward volume
       });
+      const delBtn = $('.set-del', row);
+      if(delBtn){
+        if(entry.sets.length<=1) delBtn.disabled = true;
+        delBtn.addEventListener('click', ()=>{
+          if(entry.sets.length<=1){
+            toast('An exercise needs at least one set — remove the exercise instead');
+            return;
+          }
+          entry.sets.splice(si,1);
+          save();
+          renderExBlocks(); // re-renders with sets re-indexed and stats recomputed below
+          renderSessionStats();
+        });
+      }
     });
   }
 }
@@ -3380,7 +3396,7 @@ function setHeaderRow(type){
     cardio: ['DIST', 'SEC', 'KCAL']
   }[type] || ['VALUE'];
   const rpeCol = DB.settings.showRPE ? '<span>RPE</span>' : '';
-  return `<div class="set-hdr"><span></span>${cols.map(c=>`<span>${c}</span>`).join('')}${rpeCol}<span></span><span></span></div>`;
+  return `<div class="set-hdr"><span></span>${cols.map(c=>`<span>${c}</span>`).join('')}${rpeCol}<span></span><span></span><span></span></div>`;
 }
 
 /* prevSet: this exercise's set at the same index from its most recent
@@ -3426,23 +3442,41 @@ function setRowHtml(type, set, si, gi, ii, prevSet){
     ${rpeField}
     <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}">${setTagAbbrev(set.tag)}</button>
     <div class="set-check ${set.done?'done':''}"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
+    <button class="set-del" title="Delete this set" aria-label="Delete set ${si+1}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
   </div>`;
 }
 function setTagAbbrev(tag){
   return {Working:'W', Warmup:'WU', Drop:'D', Failure:'F'}[tag] || 'W';
 }
 
-/* ---------------- Rest Timer ---------------- */
-let restTimer = {seconds:0, total:0, interval:null, nextLabel:null};
+/* ---------------- Rest Timer ----------------
+   FIX #6: rewritten for lifecycle reliability. State lives in a single object
+   keyed off a wall-clock end timestamp (endAt) rather than a per-tick
+   decrementing counter — remaining time is always *computed* from Date.now(),
+   never accumulated, so background-tab throttling can't cause drift, jumps,
+   or acceleration. A monotonically increasing token guards against any stray
+   interval callback ever acting after it's been superseded, so only one
+   timer can ever be "live" no matter how it's started/stopped. All start and
+   stop paths funnel through startRestTimer()/stopRestTimer() — nothing else
+   touches restTimer.interval or #restTimerRoot directly. */
+let restTimer = {endAt:0, total:0, interval:null, nextLabel:null};
+let restTimerToken = 0;
+function stopRestTimer(){
+  restTimerToken++;
+  if(restTimer.interval){ clearInterval(restTimer.interval); restTimer.interval=null; }
+  const root = $('#restTimerRoot');
+  if(root) root.innerHTML='';
+}
 function startRestTimer(seconds, nextLabel){
-  clearInterval(restTimer.interval);
-  restTimer = {seconds, total:seconds, interval:null, nextLabel: nextLabel||null};
+  stopRestTimer(); // guarantees at most one timer is ever active
+  const myToken = restTimerToken;
+  restTimer = {endAt: Date.now()+seconds*1000, total: seconds, interval:null, nextLabel: nextLabel||null};
   renderRestTimer();
   restTimer.interval = setInterval(()=>{
-    restTimer.seconds--;
-    if(restTimer.seconds<=0){
-      clearInterval(restTimer.interval);
-      $('#restTimerRoot').innerHTML='';
+    if(myToken!==restTimerToken){ clearInterval(restTimer.interval); return; } // stale tick safety net
+    const remaining = Math.ceil((restTimer.endAt-Date.now())/1000);
+    if(remaining<=0){
+      stopRestTimer();
       playRestBeep();
       toast('Rest complete — back to it!');
       return;
@@ -3469,11 +3503,14 @@ function playRestBeep(){
   }catch(e){ /* audio unavailable — toast still informs the user */ }
 }
 function renderRestTimer(){
-  const pct = clamp((restTimer.seconds/restTimer.total)*100, 0, 100);
+  const remaining = Math.max(0, Math.ceil((restTimer.endAt-Date.now())/1000));
+  const pct = clamp((remaining/restTimer.total)*100, 0, 100);
   const r = 18, circumference = 2*Math.PI*r;
   const dashOffset = circumference * (1 - pct/100);
-  const m = Math.floor(restTimer.seconds/60), sec = restTimer.seconds%60;
-  $('#restTimerRoot').innerHTML = `
+  const m = Math.floor(remaining/60), sec = remaining%60;
+  const root = $('#restTimerRoot');
+  if(!root) return;
+  root.innerHTML = `
     <div class="rest-timer">
       <div class="rt-ring">
         <svg width="44" height="44" viewBox="0 0 44 44">
@@ -3491,9 +3528,9 @@ function renderRestTimer(){
       <button class="rt-skip" id="skipRest">Skip</button>
     </div>`;
   const skip = $('#skipRest');
-  if(skip) skip.addEventListener('click', ()=>{ clearInterval(restTimer.interval); $('#restTimerRoot').innerHTML=''; });
+  if(skip) skip.addEventListener('click', stopRestTimer);
   const plus = $('#restPlus30');
-  if(plus) plus.addEventListener('click', ()=>{ restTimer.seconds += 30; restTimer.total += 30; renderRestTimer(); });
+  if(plus) plus.addEventListener('click', ()=>{ restTimer.endAt += 30000; restTimer.total += 30; renderRestTimer(); });
 }
 
 /* FIX #4: live elapsed-time ticker for the active workout — updates the on-screen
@@ -3559,7 +3596,7 @@ function completeSession(){
     if(after.best1RM > before.best1RM) newPRcount++;
   }));
   toast(newPRcount>0? `Workout saved — ${newPRcount} new PR${newPRcount>1?'s':''}! 🎉` : 'Workout saved');
-  clearInterval(restTimer.interval); $('#restTimerRoot').innerHTML='';
+  stopRestTimer();
   stopElapsedTimer();
   wkNav('home');
 }
