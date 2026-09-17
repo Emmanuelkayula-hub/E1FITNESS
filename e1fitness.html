@@ -4498,6 +4498,18 @@ function findOrCreateMeasurementForDate(date){
   if(!m){ m = {id:uid(), date, weight:null, bodyFat:null, waist:null, chest:null, hips:null, arm:null, thigh:null}; DB.measurements.push(m); }
   return m;
 }
+// Validates a raw weight-input string: must be non-blank and parse to a
+// finite, strictly-positive number. Used everywhere a weight value can sync
+// into DB.settings.profile.weightLbs, since a bad value there quietly
+// corrupts the BMR/TDEE calculator and the Progress weight trend.
+function parsePositiveWeight(raw){
+  if(raw==null) return null;
+  const trimmed = String(raw).trim();
+  if(trimmed==='') return null;
+  const n = parseFloat(trimmed);
+  if(!Number.isFinite(n) || n<=0) return null;
+  return n;
+}
 function logWeightEntry(displayWeight, date=todayISO()){
   const lbs = fromDisplayWeight(displayWeight);
   const m = findOrCreateMeasurementForDate(date);
@@ -4514,8 +4526,8 @@ function openQuickWeightModal(){
   `,{id:'qw', center:true});
   $('#mClose').addEventListener('click', ()=> closeModal('qw'));
   $('#qwSave').addEventListener('click', ()=>{
-    const w = parseFloat($('#qwWeight').value);
-    if(!w){ toast('Enter a weight'); return; }
+    const w = parsePositiveWeight($('#qwWeight').value);
+    if(w==null){ toast('Enter a valid weight greater than 0'); return; }
     logWeightEntry(w);
     closeModal('qw'); toast('Weight logged'); rerender();
   });
@@ -4540,9 +4552,12 @@ function openMeasurementModal(){
   `,{id:'ms'});
   $('#mClose').addEventListener('click', ()=> closeModal('ms'));
   $('#msSave').addEventListener('click', ()=>{
-    const w = parseFloat($('#msWeight').value);
+    const rawWeight = $('#msWeight').value;
+    const weightBlank = rawWeight==null || String(rawWeight).trim()==='';
+    const w = weightBlank ? null : parsePositiveWeight(rawWeight);
+    if(!weightBlank && w==null){ toast('Enter a valid weight greater than 0, or leave it blank'); return; }
     const m = findOrCreateMeasurementForDate(todayISO());
-    if(w){ m.weight = fromDisplayWeight(w); DB.settings.profile.weightLbs = m.weight; }
+    if(w!=null){ m.weight = fromDisplayWeight(w); DB.settings.profile.weightLbs = m.weight; }
     m.bodyFat = parsedOrKeep($('#msBF').value, m.bodyFat??null);
     m.waist = parsedOrKeep($('#msWaist').value, m.waist??null);
     m.chest = parsedOrKeep($('#msChest').value, m.chest??null);
@@ -4660,15 +4675,19 @@ function openSettingsModal(){
       save();
     });
     $('#pSave').addEventListener('click', ()=>{
+      const wRaw = $('#pWeight').value, gwRaw = $('#pGoalWeight').value;
+      const wBlank = String(wRaw).trim()==='', gwBlank = String(gwRaw).trim()==='';
+      const wParsed = wBlank ? null : parsePositiveWeight(wRaw);
+      const gwParsed = gwBlank ? null : parsePositiveWeight(gwRaw);
+      if(!wBlank && wParsed==null){ toast('Enter a valid weight greater than 0, or leave it blank'); return; }
+      if(!gwBlank && gwParsed==null){ toast('Enter a valid goal weight greater than 0, or leave it blank'); return; }
       const p = DB.settings.profile;
       p.heightCm = parseFloat($('#pHeight').value)||null;
-      const wInput = parseFloat($('#pWeight').value);
-      p.weightLbs = wInput? fromDisplayWeight(wInput) : null;
+      p.weightLbs = wParsed!=null ? fromDisplayWeight(wParsed) : null;
       p.age = parseInt($('#pAge').value)||null;
       p.sex = pendingSex;
       p.activityLevel = parseFloat($('#pActivity').value)||1.375;
-      const gwInput = parseFloat($('#pGoalWeight').value);
-      p.goalWeightLbs = gwInput? fromDisplayWeight(gwInput) : null;
+      p.goalWeightLbs = gwParsed!=null ? fromDisplayWeight(gwParsed) : null;
       p.goalType = pendingGoalType;
       p.intensity = pendingIntensity;
       save();
