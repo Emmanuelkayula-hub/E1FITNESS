@@ -423,6 +423,16 @@ function parsedOrKeep(raw, keep){
   const n = parseFloat(raw);
   return isNaN(n) ? keep : n;
 }
+/* Shared range rules for nutrition goal targets — used by the Goals screen's
+   save handler and by backup-import validation, so the two can't drift
+   apart. Assumes the value is already a finite number. Returns an error
+   message string, or null if the value is fine. */
+const GOAL_FIELD_LABELS = {calories:'Calories', protein:'Protein', carbs:'Carbs', fat:'Fat', fiber:'Fiber', sodium:'Sodium', water:'Water'};
+function goalFieldError(key, value){
+  const label = GOAL_FIELD_LABELS[key] || key;
+  if(key==='calories') return value>0 ? null : 'Calories must be greater than 0.';
+  return value>=0 ? null : `${label} can't be negative.`;
+}
 function fmt1(n){ return (Math.round(n*10)/10).toString(); }
 function fmtInt(n){ return Math.round(n).toString(); }
 function fmtDuration(totalSec){
@@ -724,7 +734,10 @@ function validateDBInner(data, errors, warnings){
   if(st.goals!=null){
     if(typeof st.goals!=='object' || Array.isArray(st.goals)) errors.push('Settings has an invalid goals object.');
     else ['calories','protein','carbs','fat','fiber','sodium','water'].forEach(k=>{
-      if(st.goals[k]!=null && !isNum(st.goals[k])) errors.push(`Settings goals.${k} is non-numeric.`);
+      if(st.goals[k]==null) return;
+      if(!isNum(st.goals[k])){ errors.push(`Settings goals.${k} is non-numeric.`); return; }
+      const rangeErr = goalFieldError(k, st.goals[k]);
+      if(rangeErr) errors.push(`Settings goals.${k}: ${rangeErr}`);
     });
   }
   if(st.profile!=null){
@@ -4126,11 +4139,39 @@ function openServingsPrompt(f, date, meal, existingLog){
 }
 
 function quickAddParse(text, date, meal){
-  // best-effort: look for "<number> cal" pattern, else try to match a food name in text
-  const calMatch = text.match(/(\d+(\.\d+)?)\s*(cal|kcal|calories)/i);
+  // An explicit calorie amount ("200 cal", "200kcal", "500 calories") always
+  // wins as a quick calorie-only entry, checked BEFORE any food-name match.
+  // Otherwise "200 cal chicken" would match "Chicken" in the database and log
+  // it using the food's own default serving/macros — silently discarding the
+  // number the user actually typed (and, worse, misreading the leading "200"
+  // as a serving-count multiplier instead of a calorie value).
+  const calMatch = text.match(/(\d+(\.\d+)?)\s*(kcal|cal|calories)\b/i);
+  if(calMatch){
+    const kcal = parseFloat(calMatch[1]);
+    if(!isFinite(kcal) || kcal<=0){ toast('Enter a valid calorie amount greater than 0'); return; }
+    // No macros are invented for a calorie-only entry — only calories are known.
+    // Tagged "(Quick Add)" so it stays visibly distinct from a real database food.
+    const quickFood = food(text.trim().slice(0,40)+' (Quick Add)', '1 entry', 0, kcal, 0,0,0,0,0);
+    quickFood.custom = true;
+    DB.foods.push(quickFood);
+    DB.foodLogs.push({id:uid(), date, meal, foodId:quickFood.id, amountType:'serving', amount:1});
+    save(); toast('Logged '+kcal+' kcal'); renderCurrent();
+    return;
+  }
   const gramMatch = text.match(/(\d+(\.\d+)?)\s*g\b/i);
   const numMatch = text.match(/^(\d+(\.\d+)?)\s+/);
-  let matchedFood = DB.foods.find(f=> text.toLowerCase().includes(f.name.toLowerCase()));
+  // Many seeded foods are named "Egg, large" or "Chicken Breast, cooked" — the
+  // qualifier after the comma is never something a user actually types, so
+  // matching only against the part before it (e.g. "egg", "chicken breast")
+  // is what lets plain input like "2 eggs" or "200 g chicken breast" match at
+  // all. Ties go to the longest matching core name, so a specific match like
+  // "chicken breast" wins over a shorter, more collision-prone one.
+  const lowerText = text.toLowerCase();
+  let matchedFood = null, bestCoreLen = 0;
+  DB.foods.forEach(f=>{
+    const core = f.name.split(',')[0].trim().toLowerCase();
+    if(core.length>=3 && core.length>bestCoreLen && lowerText.includes(core)){ matchedFood = f; bestCoreLen = core.length; }
+  });
   if(matchedFood){
     // if the text specifies a gram amount and this food has a gram basis, log by grams;
     // otherwise fall back to a serving-count multiplier (defaults to 1).
@@ -4143,15 +4184,6 @@ function quickAddParse(text, date, meal){
     const qty = numMatch? parseFloat(numMatch[1]) : 1;
     DB.foodLogs.push({id:uid(), date, meal, foodId:matchedFood.id, amountType:'serving', amount:qty});
     save(); toast('Logged '+matchedFood.name); renderCurrent();
-    return;
-  }
-  if(calMatch){
-    const kcal = parseFloat(calMatch[1]);
-    const quickFood = food(text.slice(0,40), '1 entry', 0, kcal, 0,0,0,0,0);
-    quickFood.custom = true;
-    DB.foods.push(quickFood);
-    DB.foodLogs.push({id:uid(), date, meal, foodId:quickFood.id, amountType:'serving', amount:1});
-    save(); toast('Logged '+kcal+' kcal'); renderCurrent();
     return;
   }
   toast("Couldn't match a food — try New Food for full macros.");
@@ -4222,7 +4254,7 @@ function renderNutGoals(root){
     $$('[data-v]').forEach(x=>x.classList.remove('active')); b.classList.add('active');
   }));
   $('#gSave').addEventListener('click', ()=>{
-    Object.assign(g, {
+    const candidate = {
       calories: parsedOrKeep($('#gCal').value, g.calories),
       protein: parsedOrKeep($('#gP').value, g.protein),
       carbs: parsedOrKeep($('#gC').value, g.carbs),
@@ -4230,7 +4262,12 @@ function renderNutGoals(root){
       fiber: parsedOrKeep($('#gFib').value, g.fiber),
       sodium: parsedOrKeep($('#gSod').value, g.sodium),
       water: parsedOrKeep($('#gWater').value, g.water),
-    });
+    };
+    for(const key of Object.keys(candidate)){
+      const err = goalFieldError(key, candidate[key]);
+      if(err){ toast(err); return; }
+    }
+    Object.assign(g, candidate);
     save(); toast('Goals updated'); nutNav('diary');
   });
 }
