@@ -3510,6 +3510,25 @@ function startRestTimer(seconds, nextLabel){
 }
 /* FIX #5: real short oscillator beep instead of an AudioContext created and thrown away.
    Wrapped in try/catch since some mobile browsers block audio before any user gesture. */
+// iOS Safari (and most mobile browsers) heavily throttle or fully suspend
+// setInterval while a tab is backgrounded or the screen is locked. The
+// countdown math is already timestamp-based so it's never actually wrong,
+// but without this, the DISPLAY sits frozen/stale until the next natural
+// 1s tick fires after the page becomes visible again — which itself may be
+// delayed — and reads to the user as the timer "jumping" or "freezing".
+// This forces an immediate resync from the real end timestamp the moment
+// the page regains visibility, instead of waiting on interval accuracy.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState!=='visible' || !restTimer.interval) return;
+  const remaining = Math.ceil((restTimer.endAt-Date.now())/1000);
+  if(remaining<=0){
+    stopRestTimer();
+    playRestBeep();
+    toast('Rest complete — back to it!');
+  } else {
+    renderRestTimer();
+  }
+});
 function playRestBeep(){
   try{
     const ctx = new (window.AudioContext||window.webkitAudioContext)();
