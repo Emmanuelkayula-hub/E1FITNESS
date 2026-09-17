@@ -97,6 +97,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 
 /* ---------- Screens ---------- */
 .screen{flex:1;padding:0 16px 24px 16px;overflow-y:auto;}
+/* The rest-timer bar floats fixed above the tabbar; without this, scrolling
+   to the bottom of the active workout (Session Notes / Session stats cards)
+   puts those cards directly behind it. */
+.screen.rest-padding{padding-bottom:128px;}
 .screen-head{margin:6px 0 16px 0;}
 .screen-head h1{font-size:26px;color:var(--paper);}
 .screen-head .sub{color:var(--muted);font-size:13px;margin-top:2px;}
@@ -127,6 +131,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   padding:11px 16px;font-size:14px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:8px;
 }
 .btn:active{transform:scale(0.98);}
+.btn:disabled{opacity:.55;pointer-events:none;}
 .btn-block{width:100%;}
 .btn-primary{background:var(--blue);border-color:var(--blue);color:#fff;}
 .btn-ember{background:var(--ember);border-color:var(--ember);color:#1B0E00;}
@@ -160,8 +165,14 @@ textarea.input{resize:vertical;min-height:70px;}
 .list-row{
   display:flex;align-items:center;justify-content:space-between;gap:10px;
   padding:12px 2px;border-bottom:1px solid var(--line);
+  transition:background-color .1s;
 }
 .list-row:last-child{border-bottom:none;}
+/* Tappable rows (food picker, history, saved meals, recent activity, etc.)
+   had no touch feedback at all — the row just sat there until the next
+   screen appeared, which is a big part of what makes a UI feel like a
+   website instead of an app. */
+.list-row:active{background-color:var(--surface-2);}
 .list-row .lr-main{display:flex;flex-direction:column;gap:2px;min-width:0;}
 .list-row .lr-title{font-size:14.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .list-row .lr-sub{font-size:12px;color:var(--muted);}
@@ -3622,7 +3633,11 @@ function openFinishSheet(){
   `, {id:'finish', center:true});
   $('#mClose').addEventListener('click', ()=> closeModal('finish'));
   $('#finishBack').addEventListener('click', ()=> closeModal('finish'));
-  $('#finishSave').addEventListener('click', ()=>{ closeModal('finish'); completeSession(); });
+  $('#finishSave').addEventListener('click', (e)=>{
+    if(e.currentTarget.disabled) return;
+    e.currentTarget.disabled = true;
+    closeModal('finish'); completeSession();
+  });
 }
 function completeSession(){
   const s = DB.activeSession;
@@ -3992,9 +4007,11 @@ function openFoodPicker(date, meal){
         <div class="sub" style="margin-bottom:10px;">A fast stand-in for voice logging — type what you ate and we'll match it to the database or log it as a quick calorie entry.</div>
         <button class="btn btn-primary btn-block" id="fpQuickGo">Log It</button>
       `;
-      $('#fpQuickGo').addEventListener('click', ()=>{
+      $('#fpQuickGo').addEventListener('click', (e)=>{
+        if(e.currentTarget.disabled) return;
         const text = $('#fpQuick').value.trim();
         if(!text){ return; }
+        e.currentTarget.disabled = true;
         quickAddParse(text, date, meal);
         closeModal('fp');
       });
@@ -4125,9 +4142,14 @@ function openServingsPrompt(f, date, meal, existingLog){
       amountValue = parseFloat(amtInput.value)||0;
       updatePreview();
     });
-    $('#servSave').addEventListener('click', ()=>{
+    $('#servSave').addEventListener('click', (e)=>{
+      // Guards against a fast double-tap creating two duplicate diary entries —
+      // the button's own DOM node can still receive a second synthetic click
+      // on some mobile browsers even after closeModal() detaches it.
+      if(e.currentTarget.disabled) return;
       const val = parseFloat(amtInput.value)||0;
       if(!isFinite(val) || val<=0){ toast('Enter a valid amount greater than 0'); return; }
+      e.currentTarget.disabled = true;
       if(isEdit){
         existingLog.amountType = amountType;
         existingLog.amount = val;
@@ -4864,6 +4886,19 @@ function renderOnboarding(){
     setTab('dashboard');
   });
 }
+
+/* Keeps the bottom of the active workout screen clear of the fixed rest-timer
+   bar (Session Notes / Session stats otherwise end up visually behind it once
+   scrolled to the bottom). Implemented as an observer on #restTimerRoot
+   rather than touching the rest-timer's own start/stop code, which is
+   confirmed working on-device and intentionally left alone here. */
+const restTimerPadObserver = new MutationObserver(()=>{
+  const root = $('#restTimerRoot');
+  const screen = $('#screen-workout');
+  if(!root || !screen) return;
+  screen.classList.toggle('rest-padding', root.childElementCount>0);
+});
+restTimerPadObserver.observe($('#restTimerRoot'), {childList:true});
 
 /* =========================================================
    INIT
