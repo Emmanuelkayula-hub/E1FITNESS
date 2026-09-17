@@ -97,6 +97,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 
 /* ---------- Screens ---------- */
 .screen{flex:1;padding:0 16px 24px 16px;overflow-y:auto;}
+/* Subtle entrance on genuine navigation only (see resetScreenScroll/
+   playScreenEnter) — short enough not to read as an animation, just a hint
+   that a new screen has arrived rather than a webpage swap. */
+.screen-enter{animation:screenEnter .16s ease-out;}
+@keyframes screenEnter{from{opacity:.5;transform:translateY(5px);}to{opacity:1;transform:translateY(0);}}
 /* The rest-timer bar floats fixed above the tabbar; without this, scrolling
    to the bottom of the active workout (Session Notes / Session stats cards)
    puts those cards directly behind it. */
@@ -1828,6 +1833,30 @@ function computeGoalPlan(){
 let currentTab = 'dashboard';
 const renderers = {}; // tab -> function
 
+/* Each `.screen` div is its own scroll container (overflow-y:auto), and at
+   some viewport/content-height combinations the outer page scrolls instead
+   (when a screen's content is short enough that it never actually overflows
+   its own box). window.scrollTo(0,0) only resets the latter, so on its own
+   it silently fails to reset scroll for whichever screen is currently the
+   real scroll container — this resets both, and only on genuine navigation
+   (never from an in-place rerender), so a set check/tag/add doesn't yank the
+   user's scroll position around mid-workout. */
+function resetScreenScroll(tab){
+  const el = document.getElementById('screen-'+tab);
+  if(el) el.scrollTop = 0;
+  window.scrollTo(0,0);
+  if(el) playScreenEnter(el);
+}
+/* Very short, subtle fade+rise on genuine screen/subview navigation only —
+   restarted via a reflow trick since re-adding the same class name while
+   already present would otherwise not replay the CSS animation. Respects
+   prefers-reduced-motion via the global rule that zeroes animation-duration. */
+function playScreenEnter(el){
+  el.classList.remove('screen-enter');
+  void el.offsetWidth;
+  el.classList.add('screen-enter');
+}
+
 function setTab(tab){
   currentTab = tab;
   $$('.tab-btn').forEach(b=> b.classList.toggle('active', b.dataset.tab===tab));
@@ -1835,7 +1864,7 @@ function setTab(tab){
     $('#screen-'+t).classList.toggle('hidden', t!==tab);
   });
   renderCurrent();
-  window.scrollTo(0,0);
+  resetScreenScroll(tab);
 }
 
 function renderCurrent(){
@@ -2419,7 +2448,7 @@ renderers.workout = function(){
   }
 };
 
-function wkNav(view, extra={}){ wk = {...wk, view, ...extra}; renderCurrent(); window.scrollTo(0,0); }
+function wkNav(view, extra={}){ wk = {...wk, view, ...extra}; renderCurrent(); resetScreenScroll('workout'); }
 
 function backHeader(title, onBack, right=''){
   return `<div class="screen-head" style="display:flex;align-items:center;gap:10px;">
@@ -3853,7 +3882,7 @@ renderers.nutrition = function(){
   }
 };
 
-function nutNav(view, extra={}){ nut = {...nut, view, ...extra}; renderCurrent(); window.scrollTo(0,0); }
+function nutNav(view, extra={}){ nut = {...nut, view, ...extra}; renderCurrent(); resetScreenScroll('nutrition'); }
 
 function renderDiary(root){
   const date = nut.date;
