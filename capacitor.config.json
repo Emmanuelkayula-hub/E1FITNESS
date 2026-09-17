@@ -1,0 +1,30 @@
+{
+  "appId": "com.e1fitness.app",
+  "appName": "E1FITNESS",
+  "webDir": "src",
+  "backgroundColor": "#0E1116",
+  "server": {
+    "androidScheme": "https"
+  },
+  "ios": {
+    "backgroundColor": "#0E1116",
+    "contentInset": "always"
+  },
+  "android": {
+    "backgroundColor": "#0E1116"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 400,
+      "backgroundColor": "#0E1116",
+      "androidSplashResourceName": "splash",
+      "showSpinner": false,
+      "splashFullScreen": true,
+      "splashImmersive": true
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#0E1116"
+    }
+  }
+}
