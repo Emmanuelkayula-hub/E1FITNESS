@@ -1892,6 +1892,13 @@ function routineById(id){ return DB.routines.find(r=>r.id===id); }
 function mealById(id){ return DB.meals.find(m=>m.id===id); }
 
 function dayFoodLogs(date){ return DB.foodLogs.filter(l=>l.date===date); }
+// Most recent time this food was logged (any date), newest first — used to
+// default a fresh log's amount to "however much you usually have" instead of
+// the food's default serving, so re-logging a familiar food is a real repeat.
+function mostRecentLogForFood(foodId){
+  for(let i=DB.foodLogs.length-1;i>=0;i--){ if(DB.foodLogs[i].foodId===foodId) return DB.foodLogs[i]; }
+  return null;
+}
 
 /* =========================================================
    FIX #6: flexible food-amount helpers.
@@ -1975,13 +1982,17 @@ function mondayOf(iso){
   d.setDate(d.getDate()+diff);
   return localISODate(d);
 }
-function weekDayStripHTML(selectedDate){
+// isLoggedFn defaults to "has a workout session" for the Dashboard's strip;
+// the Nutrition Diary passes a food-log check instead, since a workout day
+// isn't a meaningful "logged" signal on a nutrition screen.
+function weekDayStripHTML(selectedDate, isLoggedFn){
   const monday = mondayOf(todayISO());
   const labels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   const today = todayISO();
+  const checkLogged = isLoggedFn || (iso=> DB.sessions.some(s=>s.date===iso));
   return `<div class="day-strip">${labels.map((lbl,i)=>{
     const iso = shiftDate(monday,i);
-    const logged = DB.sessions.some(s=>s.date===iso);
+    const logged = checkLogged(iso);
     const isToday = iso===today;
     const isSel = iso===selectedDate;
     const dNum = new Date(iso+'T00:00:00').getDate();
@@ -3806,7 +3817,7 @@ function renderDiary(root){
       <h1>Nutrition</h1>
       <div class="sub">${escapeHtml('E1FITNESS food & macro tracker')}</div>
     </div>
-    ${weekDayStripHTML(date)}
+    ${weekDayStripHTML(date, iso=> dayFoodLogs(iso).length>0)}
     <div class="row" style="align-items:center;margin-bottom:10px;">
       <button class="icon-btn" id="prevDay">‹</button>
       <div style="flex:2;text-align:center;font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;">${dateLabel(date)}</div>
@@ -4033,14 +4044,17 @@ function openServingsPrompt(f, date, meal, existingLog){
   closeModal('fp');
   const isEdit = !!existingLog;
   const hasGramBasis = f.servingGrams && f.servingGrams>0;
-  let amountType = isEdit ? existingLog.amountType : (hasGramBasis ? 'grams' : 'serving');
-  let amountValue = isEdit ? existingLog.amount : (hasGramBasis ? f.servingGrams : 1);
+  const prevLogRaw = !isEdit ? mostRecentLogForFood(f.id) : null;
+  // Ignore a previous "grams" log if this food no longer has a gram basis to convert against.
+  const prevLog = (prevLogRaw && logAmountType(prevLogRaw)==='grams' && !hasGramBasis) ? null : prevLogRaw;
+  let amountType = isEdit ? existingLog.amountType : (prevLog ? logAmountType(prevLog) : (hasGramBasis ? 'grams' : 'serving'));
+  let amountValue = isEdit ? existingLog.amount : (prevLog ? logAmountValue(prevLog) : (hasGramBasis ? f.servingGrams : 1));
   render();
 
   function render(){
     const html = `
       <div class="modal-head"><h3>${escapeHtml(f.name)}</h3><button class="icon-btn" id="mClose">✕</button></div>
-      <div class="sub" style="margin-bottom:10px;">Default serving: ${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal</div>
+      <div class="sub" style="margin-bottom:10px;">Default serving: ${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal${prevLog? ' · prefilled from your last log' : ''}</div>
       ${hasGramBasis ? `
         <div class="field"><label>Log By</label>
           <div class="seg">
@@ -4081,7 +4095,7 @@ function openServingsPrompt(f, date, meal, existingLog){
     });
     $('#servSave').addEventListener('click', ()=>{
       const val = parseFloat(amtInput.value)||0;
-      if(val<=0){ toast('Enter an amount greater than 0'); return; }
+      if(!isFinite(val) || val<=0){ toast('Enter a valid amount greater than 0'); return; }
       if(isEdit){
         existingLog.amountType = amountType;
         existingLog.amount = val;
@@ -4242,9 +4256,11 @@ function renderMealsList(root){
   }));
   $$('[data-quicklog]').forEach(el=> el.addEventListener('click', ()=>{
     const m = mealById(el.dataset.quicklog);
-    const logDate = nut.date || todayISO();
-    m.items.forEach(it=> DB.foodLogs.push({id:uid(), date:logDate, meal:'Snacks', foodId:it.foodId, amountType:'serving', amount:it.servings}));
-    save(); toast('Logged '+m.name+' to '+dateLabel(logDate)+"'s Snacks");
+    openMealSlotChooser(slot=>{
+      const logDate = nut.date || todayISO();
+      m.items.forEach(it=> DB.foodLogs.push({id:uid(), date:logDate, meal:slot, foodId:it.foodId, amountType:'serving', amount:it.servings}));
+      save(); toast('Logged '+m.name+' to '+dateLabel(logDate)+"'s "+slot);
+    });
   }));
 }
 function renderMealEdit(root){
@@ -4321,7 +4337,10 @@ function renderPlanner(root){
           const mealId = planned[slot];
           const meal = mealId? mealById(mealId) : null;
           return `<div class="list-row"><div class="lr-main"><div class="lr-title">${slot}</div><div class="lr-sub">${meal?escapeHtml(meal.name):'Not planned'}</div></div>
-            <button class="btn btn-sm btn-ghost" data-plan="${d}|${slot}">${meal?'Change':'Plan'}</button></div>`;
+            <div style="display:flex;gap:6px;flex:none;">
+              <button class="btn btn-sm btn-ghost" data-plan="${d}|${slot}">${meal?'Change':'Plan'}</button>
+              ${meal? `<button class="btn btn-sm btn-ghost" data-unplan="${d}|${slot}" title="Remove plan">✕</button>` : ''}
+            </div></div>`;
         }).join('')}
       </div>`;
     }).join('')}
@@ -4338,6 +4357,21 @@ function renderPlanner(root){
       save(); renderCurrent();
     });
   }));
+  $$('[data-unplan]').forEach(b=> b.addEventListener('click', ()=>{
+    const [d,slot] = b.dataset.unplan.split('|');
+    if(DB.mealPlan[d]) delete DB.mealPlan[d][slot];
+    save(); renderCurrent();
+  }));
+}
+// One-tap meal-slot picker — used wherever a saved meal or repeat action
+// needs to know which of today's meal slots to log into, since that context
+// isn't implied on screens like Saved Meals that aren't scoped to one slot.
+function openMealSlotChooser(onPick){
+  const html = `<div class="modal-head"><h3>Log To</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div>${MEAL_SLOTS.map(s=>`<div class="list-row" data-slot="${s}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${s}</div></div></div>`).join('')}</div>`;
+  openModal(html, {id:'msc', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('msc'));
+  $$('[data-slot]').forEach(el=> el.addEventListener('click', ()=>{ closeModal('msc'); onPick(el.dataset.slot); }));
 }
 function openMealChooser(onPick){
   const html = `<div class="modal-head"><h3>Choose Meal</h3><button class="icon-btn" id="mClose">✕</button></div>
