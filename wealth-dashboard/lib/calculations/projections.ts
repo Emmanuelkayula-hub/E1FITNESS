@@ -97,7 +97,8 @@ export function runScenario(inputs: ScenarioInputs): ScenarioOutputs {
   }
 
   const feesPaid = portfolioGross.minus(portfolioNet);
-  const realPortfolioValue = calculateRealValue(portfolioNet, inflationPercent, horizonYears);
+  const inflationFraction = new Decimal(inflationPercent).dividedBy(100);
+  const realPortfolioValue = calculateRealValue(portfolioNet, inflationFraction, horizonYears);
 
   return {
     totalContributions,
