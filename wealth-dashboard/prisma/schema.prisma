@@ -1,0 +1,600 @@
+// EK Wealth & Career Dashboard — database schema.
+// See /docs/ARCHITECTURE.md for the module map and /docs/CALCULATIONS.md
+// for the formulas that read/write these tables.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Shared enums
+// ---------------------------------------------------------------------------
+
+enum VerificationStatus {
+  VERIFIED // user has confirmed this observation as reliable
+  USER_INPUT
+  OFFICIAL
+  ASSUMPTION
+  UNVERIFIED
+  CONFLICTING
+  ESTIMATED
+  STALE
+}
+
+enum SourceType {
+  OFFICIAL
+  USER_DOCUMENT
+  MANUAL
+  THIRD_PARTY
+}
+
+enum LockMethodology {
+  PER_CONTRIBUTION
+  FROM_FIRST_INVESTMENT
+  CUSTOM
+  UNKNOWN
+}
+
+enum ExamStatus {
+  NOT_STARTED
+  STUDYING
+  REVISION
+  MOCK_EXAMS
+  COMPLETED
+  PASSED
+  DEFERRED
+}
+
+enum ConflictStatus {
+  OPEN
+  REVIEWED
+  ACCEPTED_A
+  ACCEPTED_B
+  KEPT_BOTH
+  MARKED_STALE
+}
+
+// ---------------------------------------------------------------------------
+// Core identity / settings
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  profile           Profile?
+  careerProfile     CareerProfile?
+  investmentFunds   InvestmentFund[]
+  investmentLots    InvestmentLot[]
+  contributions     Contribution[]
+  savingsAccounts   SavingsAccount[]
+  exams             Exam[]
+  studySessions     StudySession[]
+  careerExpenses    CareerExpense[]
+  scenarios         Scenario[]
+  dataSources       DataSource[]
+  dataConflicts     DataConflict[]
+  reports           Report[]
+  auditLogs         AuditLog[]
+  settings          ApplicationSetting[]
+  contributionPlans ContributionPlan[]
+}
+
+model Profile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName                  String?
+  currency                  String  @default("ZMW")
+  monthlyEssentials         Decimal @default(0) @db.Decimal(18, 4)
+  emergencyFundMonthsTarget Decimal @default(6) @db.Decimal(5, 2)
+  inflationAssumption       Decimal @default(0.065) @db.Decimal(7, 4)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Investments
+// ---------------------------------------------------------------------------
+
+model InvestmentFund {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name     String
+  provider String?
+  fundType String  @default("Unit Trust / Equity Fund")
+
+  // Configurable, historically-observed assumptions (not "live" values —
+  // see FundResearchProfile / DataObservation for the sourced history).
+  annualFeePercent              Decimal         @default(0) @db.Decimal(7, 4)
+  entryFeePercent               Decimal         @default(0) @db.Decimal(7, 4)
+  exitFeePercent                Decimal         @default(0) @db.Decimal(7, 4)
+  minimumInvestment             Decimal         @default(0) @db.Decimal(18, 4)
+  minimumHoldingMonths          Int             @default(12)
+  earlyWithdrawalPenaltyPercent Decimal         @default(0) @db.Decimal(7, 4)
+  lockMethodology               LockMethodology @default(PER_CONTRIBUTION)
+  custodian                     String?
+  trustee                       String?
+  regulator                     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lots            InvestmentLot[]
+  priceHistory    FundPrice[]
+  researchProfile FundResearchProfile?
+  contributions   Contribution[]
+
+  @@index([userId])
+}
+
+// Every contribution is one permanent lot (spec §9 Lot Accounting).
+model InvestmentLot {
+  id             String         @id @default(cuid())
+  userId         String
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fundId         String
+  fund           InvestmentFund @relation(fields: [fundId], references: [id], onDelete: Cascade)
+  contributionId String         @unique
+  contribution   Contribution   @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+
+  purchaseDate  DateTime
+  units         Decimal  @db.Decimal(24, 8) // high precision, §64/§65
+  purchasePrice Decimal  @db.Decimal(18, 6)
+  unlockDate    DateTime // derived at write time from fund lock methodology; recomputable
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([fundId])
+  @@index([unlockDate])
+}
+
+model Contribution {
+  id     String         @id @default(cuid())
+  userId String
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fundId String
+  fund   InvestmentFund @relation(fields: [fundId], references: [id], onDelete: Cascade)
+
+  date                DateTime
+  amount              Decimal  @db.Decimal(18, 4)
+  unitPriceAtPurchase Decimal  @db.Decimal(18, 6)
+  fees                Decimal  @default(0) @db.Decimal(18, 4)
+  netInvested         Decimal  @db.Decimal(18, 4)
+  source              String?
+  notes               String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lot InvestmentLot?
+
+  @@index([userId])
+  @@index([fundId])
+  @@index([date])
+}
+
+model FundPrice {
+  id     String         @id @default(cuid())
+  fundId String
+  fund   InvestmentFund @relation(fields: [fundId], references: [id], onDelete: Cascade)
+
+  date               DateTime
+  unitPrice          Decimal            @db.Decimal(18, 6)
+  source             String
+  sourceType         SourceType         @default(MANUAL)
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  notes              String?
+
+  createdAt DateTime @default(now())
+
+  @@index([fundId])
+  @@index([date])
+}
+
+// Verified historical research snapshot for a fund — distinct from FundPrice
+// because these are point-in-time fact-sheet claims (fee, penalty, return),
+// not a price time series. Never overwritten; superseded rows are kept.
+model FundResearchProfile {
+  id     String         @id @default(cuid())
+  fundId String         @unique
+  fund   InvestmentFund @relation(fields: [fundId], references: [id], onDelete: Cascade)
+
+  observationDate          DateTime
+  unitPrice                Decimal?           @db.Decimal(18, 6)
+  twelveMonthReturnPercent Decimal?           @db.Decimal(9, 4)
+  annualFeePercent         Decimal?           @db.Decimal(7, 4)
+  source                   String
+  verificationStatus       VerificationStatus @default(VERIFIED)
+  notes                    String?
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Market data / benchmark
+// ---------------------------------------------------------------------------
+
+model MarketIndex {
+  id                 String     @id @default(cuid())
+  code               String // e.g. "LASI"
+  name               String
+  date               DateTime
+  level              Decimal    @db.Decimal(18, 4)
+  dailyChangePercent Decimal?   @db.Decimal(9, 4)
+  volume             Decimal?   @db.Decimal(20, 4)
+  valueTraded        Decimal?   @db.Decimal(20, 4)
+  trades             Int?
+  source             String
+  sourceType         SourceType @default(THIRD_PARTY)
+  retrievedAt        DateTime   @default(now())
+
+  createdAt DateTime @default(now())
+
+  @@index([code, date])
+}
+
+model Dividend {
+  id                 String             @id @default(cuid())
+  instrumentCode     String // fund id or index code this applies to
+  exDate             DateTime
+  amount             Decimal?           @db.Decimal(18, 6)
+  yieldPercent       Decimal?           @db.Decimal(9, 4)
+  source             String
+  verificationStatus VerificationStatus @default(ESTIMATED)
+  notes              String?
+
+  createdAt DateTime @default(now())
+
+  @@index([instrumentCode, exDate])
+}
+
+// ---------------------------------------------------------------------------
+// Savings
+// ---------------------------------------------------------------------------
+
+model SavingsAccount {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name        String
+  provider    String?
+  compounding String  @default("monthly")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rates        SavingsRate[]
+  transactions SavingsTransaction[]
+
+  @@index([userId])
+}
+
+model SavingsRate {
+  id        String         @id @default(cuid())
+  accountId String
+  account   SavingsAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  balanceBandMin     Decimal            @db.Decimal(18, 4)
+  balanceBandMax     Decimal?           @db.Decimal(18, 4) // null = open-ended top tier
+  annualRatePercent  Decimal            @db.Decimal(7, 4)
+  effectiveDate      DateTime
+  source             String
+  verificationStatus VerificationStatus @default(USER_INPUT)
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+}
+
+model SavingsTransaction {
+  id        String         @id @default(cuid())
+  accountId String
+  account   SavingsAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  date         DateTime
+  type         String // "deposit" | "withdrawal" | "interest"
+  amount       Decimal  @db.Decimal(18, 4)
+  balanceAfter Decimal? @db.Decimal(18, 4)
+  source       String?
+  notes        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([date])
+}
+
+// ---------------------------------------------------------------------------
+// Internship / contribution allocation
+// ---------------------------------------------------------------------------
+
+model ContributionPlan {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name           String
+  monthlyStipend Decimal @db.Decimal(18, 4)
+  active         Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  phases ContributionPlanPhase[]
+
+  @@index([userId])
+}
+
+model ContributionPlanPhase {
+  id     String           @id @default(cuid())
+  planId String
+  plan   ContributionPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  label         String
+  monthStart    Int
+  monthEnd      Int
+  equityAmount  Decimal @db.Decimal(18, 4)
+  savingsAmount Decimal @db.Decimal(18, 4)
+
+  @@index([planId])
+}
+
+// ---------------------------------------------------------------------------
+// Career
+// ---------------------------------------------------------------------------
+
+model CareerProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  qualification       String?
+  institution         String?
+  graduationDate      DateTime?
+  currentRole         String?
+  currentEmployer     String?
+  department          String?
+  internshipStartDate DateTime?
+  internshipMonths    Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Exam {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name                 String
+  sitting              String?
+  examDate             DateTime?
+  registrationDeadline DateTime?
+  studyStartDate       DateTime?
+  targetStudyHours     Decimal?   @db.Decimal(8, 2)
+  mockAverage          Decimal?   @db.Decimal(6, 2)
+  status               ExamStatus @default(NOT_STARTED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  studySessions StudySession[]
+
+  @@index([userId])
+}
+
+model StudySession {
+  id     String  @id @default(cuid())
+  userId String
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  examId String?
+  exam   Exam?   @relation(fields: [examId], references: [id], onDelete: SetNull)
+
+  date               DateTime
+  hours              Decimal  @db.Decimal(6, 2)
+  questionsCompleted Int?     @default(0)
+  topic              String?
+  mockScorePercent   Decimal? @db.Decimal(6, 2)
+  notes              String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([examId])
+  @@index([date])
+}
+
+model CareerExpense {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  date        DateTime
+  category    String // exam fee, study materials, course, transport, membership, other
+  amount      Decimal  @db.Decimal(18, 4)
+  description String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([date])
+}
+
+// ---------------------------------------------------------------------------
+// Scenario / Monte Carlo
+// ---------------------------------------------------------------------------
+
+model Scenario {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name                       String
+  monthlyContribution        Decimal @db.Decimal(18, 4)
+  initialInvestment          Decimal @default(0) @db.Decimal(18, 4)
+  annualNominalReturnPercent Decimal @db.Decimal(7, 4)
+  annualFeePercent           Decimal @default(0) @db.Decimal(7, 4)
+  inflationPercent           Decimal @db.Decimal(7, 4)
+  contributionGrowthPercent  Decimal @default(0) @db.Decimal(7, 4)
+  horizonYears               Int
+  savingsRatePercent         Decimal @default(0) @db.Decimal(7, 4)
+  startingSavings            Decimal @default(0) @db.Decimal(18, 4)
+
+  createdAt DateTime @default(now())
+
+  results ScenarioResult[]
+
+  @@index([userId])
+}
+
+model ScenarioResult {
+  id         String   @id @default(cuid())
+  scenarioId String
+  scenario   Scenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+
+  simType               String // "deterministic" | "monte_carlo"
+  totalContributions    Decimal @db.Decimal(18, 4)
+  nominalPortfolioValue Decimal @db.Decimal(18, 4)
+  realPortfolioValue    Decimal @db.Decimal(18, 4)
+  investmentGrowth      Decimal @db.Decimal(18, 4)
+  feesPaid              Decimal @db.Decimal(18, 4)
+  savingsBalance        Decimal @db.Decimal(18, 4)
+  percentiles           Json? // { p5, p25, p50, p75, p95 } for Monte Carlo runs
+  assumptions           Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([scenarioId])
+}
+
+// ---------------------------------------------------------------------------
+// Data provenance / conflict engine
+// ---------------------------------------------------------------------------
+
+model DataSource {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name        String
+  sourceType  SourceType
+  urlOrDomain String?
+  description String?
+  reliability String? // free-text note, e.g. "user-verified fact sheet"
+  lastChecked DateTime?
+  notes       String?
+
+  createdAt DateTime @default(now())
+
+  observations DataObservation[]
+
+  @@index([userId])
+}
+
+// A single sourced value for any tracked field — the atomic unit the
+// conflict engine compares (spec §16/§17).
+model DataObservation {
+  id       String     @id @default(cuid())
+  sourceId String
+  source   DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  entityType         String // e.g. "InvestmentFund"
+  entityId           String // e.g. fund id
+  field              String // e.g. "unitPrice", "twelveMonthReturnPercent"
+  value              String // stored as string; parsed per field type
+  unit               String? // "K", "%", etc.
+  observedAt         DateTime
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  notes              String?
+
+  createdAt DateTime @default(now())
+
+  @@index([sourceId])
+  @@index([entityType, entityId, field])
+}
+
+model DataConflict {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  entityType     String
+  entityId       String
+  field          String
+  observationAId String
+  observationBId String
+  difference     Decimal?       @db.Decimal(18, 6)
+  status         ConflictStatus @default(OPEN)
+  resolutionNote String?
+  resolvedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([entityType, entityId, field])
+}
+
+// ---------------------------------------------------------------------------
+// Reports / audit / settings
+// ---------------------------------------------------------------------------
+
+model Report {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type        String // "monthly" | "quarterly"
+  periodStart DateTime
+  periodEnd   DateTime
+  snapshot    Json // computed figures at generation time, for reconciliation
+  generatedAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([periodStart, periodEnd])
+}
+
+model AuditLog {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  action        String // e.g. "contribution.edited", "price.edited", "conflict.resolved"
+  entityType    String
+  entityId      String
+  previousValue Json?
+  newValue      Json?
+  reason        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([entityType, entityId])
+}
+
+model ApplicationSetting {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, key])
+}
