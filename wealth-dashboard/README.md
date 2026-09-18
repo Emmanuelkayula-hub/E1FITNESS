@@ -42,6 +42,7 @@ npm run test:watch      # watch mode
 npm run db:migrate       # prisma migrate dev
 npm run db:seed           # re-seed (idempotent — upserts, safe to re-run)
 npm run db:studio          # Prisma Studio, browse the DB visually
+npm run test:e2e           # Playwright — starts its own dev server on :3100
 ```
 
 ## Documentation
@@ -65,12 +66,18 @@ npm run db:studio          # Prisma Studio, browse the DB visually
   the provider abstraction this is designed to slot into next.
 - **PDF export exists but wasn't visually/text verified by an automated
   renderer.** `lib/pdf/reportPdf.ts` (pdfkit) is confirmed to produce a
-  structurally valid PDF (checked with `file`), and it maps the exact
-  same `ReportSnapshot` data already verified correct on the Reports
-  page — but no `pdftotext`/screenshot-based check confirmed the
-  rendered layout, because this sandbox had no PDF-rendering tool
-  available and couldn't reach one via `apt`/`pip`. Worth a manual look
-  before relying on it.
+  structurally valid PDF (checked with `file`, and its PDF-response
+  Content-Type/magic-bytes are asserted in `e2e/reports.spec.ts`), and
+  it maps the exact same `ReportSnapshot` data already verified correct
+  on the Reports page — but no `pdftotext`/screenshot-based check
+  confirmed the rendered layout, because this sandbox had no
+  PDF-rendering tool available and couldn't reach one via `apt`/`pip`.
+  Worth a manual look before relying on it.
+- **E2E coverage is Chromium-only, single viewport, and doesn't reach
+  every module.** `e2e/` covers Dashboard, Investments, Savings,
+  Research (the conflict-resolution flow), Reports, and CSV import.
+  Benchmark, Projections/Monte Carlo, and Career were manually
+  smoke-tested per phase instead — see docs/TESTING.md.
 
 ## Deployment
 

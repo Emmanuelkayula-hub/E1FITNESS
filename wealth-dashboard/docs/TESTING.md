@@ -7,9 +7,10 @@ npm run test         # run once
 npm run test:watch   # watch mode
 ```
 
-98 tests across 10 files, all in `lib/calculations/*` (pure functions,
-no database) — run `npm run test` before every commit; CI-equivalent
-manual gate used throughout this build was: `tsc --noEmit` → `vitest
+112 tests across 12 files: most in `lib/calculations/*` (pure functions,
+no database), plus `lib/csvParse.ts` and the CSV import header-mapping
+layer. Run `npm run test` before every commit; CI-equivalent manual gate
+used throughout this build was: `tsc --noEmit` → `eslint .` → `vitest
 run` → `next build`, every phase.
 
 | File | Covers | Notable edge cases |
@@ -24,6 +25,37 @@ run` → `next build`, every phase.
 | `projections.test.ts` | Scenario engine | **Regression test for a real bug** (inflationPercent passed unconverted into calculateRealValue — see below), fee monotonicity |
 | `studyAnalytics.test.ts` | Study hour/question/mock aggregation | Empty session list, no-score mock average |
 | `csv.test.ts` | CSV export builder | Comma/quote/newline escaping per RFC 4180 |
+| `csvParse.test.ts` | CSV import parser | Quoted fields with commas/newlines/doubled quotes, CRLF |
+| `csvImportMapping.test.ts` | Column-alias resolution | "Contribution Date"/"transaction_date" both resolve to the same field |
+
+## End-to-end tests (Playwright)
+
+```
+npm run test:e2e
+```
+
+11 tests in `e2e/`, run against a real `next dev` server (port 3100) and
+the real Postgres dev database — no mocking, matching this project's
+verify-against-real-data approach used throughout every phase's manual
+smoke-testing. `playwright.config.ts` points `launchOptions.executablePath`
+at this sandbox's pre-installed Chromium directly (`/opt/pw-browsers/chromium`),
+since the `@playwright/test` version installed via npm didn't match the
+browser revision baked into the image.
+
+| File | Covers |
+|---|---|
+| `dashboard.spec.ts` | Dashboard loads with real aggregated figures; every nav link resolves |
+| `investments.spec.ts` | Recording a contribution creates a new lot with correctly computed units; the early-withdrawal calculator renders |
+| `savings.spec.ts` | Recording a deposit updates the running balance; the income-allocation calculator applies the survival-first floor |
+| `research.spec.ts` | The real Longhorn conflict is visible and resolvable end-to-end (resets itself back to OPEN in `afterAll`) |
+| `reports.spec.ts` | Generating a report adds it to history with a working PDF download link (verified as a real `%PDF`-prefixed response); the report's net-worth figure matches the Dashboard's; CSV export endpoints return real CSV |
+| `csvImport.spec.ts` | Uploading a CSV previews with correct valid/invalid classification and imports only the valid rows |
+
+Because these tests mutate the same dev database rather than a scratch
+one, each was written to tolerate re-running: unique per-run values
+(timestamps) where a natural key would otherwise collide, and an
+`afterAll` reset for the one test (`research.spec.ts`) that changes
+long-lived seed state. Confirmed stable across two consecutive full runs.
 
 ## A bug this test suite caught mid-build
 
@@ -40,12 +72,14 @@ unit-mismatch bug can't regress silently again.
 
 ## What is NOT covered
 
-- **No Playwright/E2E tests.** Every module was instead manually smoke-
-  tested against the real local Postgres database via `tsx` scripts and
-  `curl` against a running `next dev` server at the end of each phase
-  (see the phase-by-phase commit messages for the specific numbers
-  verified). This is a real gap for a production deployment — see the
-  final status report's "known limitations."
+- **Only one browser/viewport in the E2E suite.** `playwright.config.ts`
+  runs a single Chromium desktop project — no Firefox/WebKit, no mobile
+  viewport, no CI matrix. Every module not covered by an `e2e/*.spec.ts`
+  file (Benchmark, Projections/Monte Carlo, Career) was instead manually
+  smoke-tested against the real local Postgres database via `tsx`
+  scripts and `curl` at the end of its phase (see the phase-by-phase
+  commit messages for the specific numbers verified) rather than getting
+  a browser-driven test.
 - **No database-integration tests** (e.g. testing `lib/data/*` functions
   against a test database in CI). The calculation engine they call is
   fully unit-tested; the data-layer functions themselves were verified
