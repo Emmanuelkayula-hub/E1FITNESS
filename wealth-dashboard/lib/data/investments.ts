@@ -19,7 +19,7 @@ export async function getFundsForUser(userId: string) {
     where: { userId },
     include: {
       researchProfile: true,
-      lots: { orderBy: { purchaseDate: "asc" } },
+      lots: { include: { contribution: true }, orderBy: { purchaseDate: "asc" } },
       priceHistory: { orderBy: { date: "desc" }, take: 1 },
     },
     orderBy: { createdAt: "asc" },
