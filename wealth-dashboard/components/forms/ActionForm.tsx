@@ -1,25 +1,26 @@
 "use client";
 
 import { useActionState } from "react";
-import type { SettingsActionState } from "@/app/settings/actions";
 
-type Action = (state: SettingsActionState, formData: FormData) => Promise<SettingsActionState>;
+export type ActionState = { ok: boolean; error?: string };
 
-export function SettingsForm({
+type Action = (state: ActionState, formData: FormData) => Promise<ActionState>;
+
+export function ActionForm({
   action,
   children,
   submitLabel,
+  className,
 }: {
   action: Action;
   children: React.ReactNode;
   submitLabel: string;
+  className?: string;
 }) {
-  const [state, formAction, pending] = useActionState<SettingsActionState, FormData>(action, {
-    ok: false,
-  });
+  const [state, formAction, pending] = useActionState<ActionState, FormData>(action, { ok: false });
 
   return (
-    <form action={formAction} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <form action={formAction} className={className ?? "grid grid-cols-1 gap-4 sm:grid-cols-2"}>
       {children}
       <div className="sm:col-span-2 flex items-center gap-3">
         <button type="submit" className="btn-primary" disabled={pending}>

@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/currentUser";
 import { Card, CardHeader } from "@/components/ui/Card";
-import { SettingsForm } from "@/components/forms/SettingsForm";
+import { ActionForm } from "@/components/forms/ActionForm";
+import { Field } from "@/components/forms/Field";
 import { updateProfileSettings, updateFundSettings } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ export default async function SettingsPage() {
           title="Profile & assumptions"
           subtitle="Timezone Africa/Lusaka. Date format DD/MM/YYYY."
         />
-        <SettingsForm action={updateProfileSettings} submitLabel="Save profile settings">
+        <ActionForm action={updateProfileSettings} submitLabel="Save profile settings">
           <Field label="Currency">
             <input
               name="currency"
@@ -61,7 +62,7 @@ export default async function SettingsPage() {
               className="input"
             />
           </Field>
-        </SettingsForm>
+        </ActionForm>
       </Card>
 
       {funds.map((fund) => (
@@ -70,7 +71,7 @@ export default async function SettingsPage() {
             title={`${fund.name} — fund settings`}
             subtitle="Lock-in methodology is a planning assumption. Confirm with the fund manager."
           />
-          <SettingsForm action={updateFundSettings} submitLabel="Save fund settings">
+          <ActionForm action={updateFundSettings} submitLabel="Save fund settings">
             <input type="hidden" name="fundId" value={fund.id} />
             <Field label="Annual management fee (%)">
               <input
@@ -115,18 +116,9 @@ export default async function SettingsPage() {
               Planning assumption — confirm the actual lock-in mechanics with Longhorn
               (WhatsApp 0770668766) before relying on unlock dates.
             </div>
-          </SettingsForm>
+          </ActionForm>
         </Card>
       ))}
     </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1 text-sm">
-      <span className="text-xs font-medium text-muted">{label}</span>
-      {children}
-    </label>
   );
 }
