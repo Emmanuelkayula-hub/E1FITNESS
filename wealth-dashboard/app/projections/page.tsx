@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/currentUser";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { ScenarioCalculator } from "@/components/projections/ScenarioCalculator";
+import { MonteCarloCalculator } from "@/components/projections/MonteCarloCalculator";
 import { formatDate, formatMoney } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +30,14 @@ export default async function ProjectionsPage() {
       <Card>
         <CardHeader title="Scenario calculator" />
         <ScenarioCalculator />
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Monte Carlo simulation"
+          subtitle="Default 10,000 simulations. Runs server-side so the browser never freezes."
+        />
+        <MonteCarloCalculator />
       </Card>
 
       {scenarios.length > 0 && (
