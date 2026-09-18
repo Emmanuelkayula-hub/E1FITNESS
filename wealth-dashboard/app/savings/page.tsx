@@ -43,7 +43,10 @@ export default async function SavingsPage() {
           <StatTile label="Target" value={formatMoney(emergencyFund.target.toString())} />
           <StatTile
             label="Percentage funded"
-            value={formatPercent(emergencyFund.percentageFunded.toString(), { alreadyPercent: true })}
+            value={formatPercent(emergencyFund.percentageFunded.toString(), {
+              alreadyPercent: true,
+              showSign: false,
+            })}
             tone={emergencyFund.percentageFunded.gte(100) ? "positive" : "neutral"}
           />
           <StatTile
@@ -157,7 +160,7 @@ export default async function SavingsPage() {
                   <td className="mono">
                     {formatPercent(
                       phase.equityAmount.dividedBy(phase.equityAmount.plus(phase.savingsAmount)).toString(),
-                      { alreadyPercent: false }
+                      { alreadyPercent: false, showSign: false }
                     )}
                   </td>
                 </tr>

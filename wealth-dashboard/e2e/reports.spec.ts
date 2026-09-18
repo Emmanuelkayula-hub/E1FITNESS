@@ -23,11 +23,11 @@ test.describe("Reports", () => {
 
   test("the latest report's snapshot figures match the dashboard", async ({ page }) => {
     await page.goto("/dashboard");
-    // The "Net worth" card's StatTile is labelled "Total" — walk up from the
-    // "Net worth" heading to its Card container (the nearest ancestor div
-    // that also has a value span), then read that value directly.
-    const netWorthHeading = page.getByRole("heading", { name: "Net worth", exact: true });
-    const netWorthCard = netWorthHeading.locator('xpath=ancestor::div[.//span[contains(@class,"mono")]][1]');
+    // The Net Worth StatTile's label span reads "Net worth" (no separate
+    // heading) — walk up from that label to its containing StatTile div,
+    // then read the value span next to it.
+    const netWorthLabel = page.getByText("Net worth", { exact: true });
+    const netWorthCard = netWorthLabel.locator('xpath=ancestor::div[.//span[contains(@class,"mono")]][1]');
     const netWorthValue = await netWorthCard.locator("span.mono").first().innerText();
     expect(netWorthValue).toMatch(/^K[\d,]+\.\d{2}$/);
 

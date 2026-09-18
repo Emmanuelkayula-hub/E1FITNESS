@@ -44,7 +44,9 @@ export function IncomeAllocationCalculator({
         </div>
         <div className="flex flex-col gap-0.5">
           <span className="text-[11px] uppercase tracking-wide text-muted">Equity share</span>
-          <span className="mono font-semibold">{formatPercent(result.equityShare.toString())}</span>
+          <span className="mono font-semibold">
+            {formatPercent(result.equityShare.toString(), { showSign: false })}
+          </span>
         </div>
       </div>
       <p className={`text-xs ${result.rule === "SURVIVAL_FIRST" ? "text-warning" : "text-muted-2"}`}>

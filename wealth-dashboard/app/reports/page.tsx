@@ -165,7 +165,10 @@ export default async function ReportsPage() {
               ))}
               <StatTile
                 label="Emergency fund coverage"
-                value={formatPercent(snapshot.emergencyFund.percentageFunded, { alreadyPercent: true })}
+                value={formatPercent(snapshot.emergencyFund.percentageFunded, {
+                  alreadyPercent: true,
+                  showSign: false,
+                })}
                 sub={`Target ${formatMoney(snapshot.emergencyFund.target)}`}
               />
             </div>

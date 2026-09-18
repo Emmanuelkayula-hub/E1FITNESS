@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { getFundsForUser } from "@/lib/data/investments";
 import { getLiquiditySummary, getEmergencyFundStatus } from "@/lib/data/dashboard";
-import { daysUntil } from "@/lib/format";
+import { describeConflictField } from "@/lib/data/entityLabels";
+import { daysUntil, formatMoney } from "@/lib/format";
 
 export type AlertSeverity = "info" | "warning" | "critical";
 
@@ -31,7 +32,7 @@ export async function computeAlerts(userId: string): Promise<Alert[]> {
       alerts.push({
         severity: days <= 14 ? "warning" : "info",
         title: "Upcoming investment unlock",
-        detail: `${liquidity.nextUnlock.amount.toString()} unlocks in ${days} day(s), on the lot's contribution-date-plus-lock-period.`,
+        detail: `${formatMoney(liquidity.nextUnlock.amount)} unlocks in ${days} day(s), on the lot's contribution-date-plus-lock-period.`,
       });
     }
   }
@@ -53,10 +54,11 @@ export async function computeAlerts(userId: string): Promise<Alert[]> {
     where: { userId, status: "OPEN" },
   });
   for (const conflict of openConflicts) {
+    const label = await describeConflictField(conflict.entityType, conflict.entityId, conflict.field);
     alerts.push({
       severity: "critical",
       title: "Data discrepancy detected",
-      detail: `${conflict.entityType} ${conflict.field}: two sources disagree${
+      detail: `${label}: two sources disagree${
         conflict.difference ? ` by ${conflict.difference.toString()}` : ""
       }. Review in Research.`,
     });

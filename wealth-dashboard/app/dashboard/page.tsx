@@ -47,9 +47,8 @@ export default async function DashboardPage() {
 
       {/* 1. Net worth */}
       <Card>
-        <CardHeader title="Net worth" />
         <StatTile
-          label="Total"
+          label="Net worth"
           value={formatMoney(netWorth.netWorth.toString())}
           sub={netWorth.investmentValueIsPartial ? "Partial — a fund is missing a current price" : undefined}
         />
@@ -99,9 +98,14 @@ export default async function DashboardPage() {
         <Card>
           <CardHeader title="Emergency fund" />
           <StatTile
-            label={`${emergencyFund.monthsCovered.toNumber().toFixed(1)} months covered`}
-            value={formatPercent(emergencyFund.percentageFunded.toString(), { alreadyPercent: true })}
-            sub={`Target ${formatMoney(emergencyFund.target.toString())}`}
+            label="Percentage funded"
+            value={formatPercent(emergencyFund.percentageFunded.toString(), {
+              alreadyPercent: true,
+              showSign: false,
+            })}
+            sub={`${emergencyFund.monthsCovered.toNumber().toFixed(1)} months covered · target ${formatMoney(
+              emergencyFund.target.toString()
+            )}`}
             tone={emergencyFund.percentageFunded.gte(100) ? "positive" : "neutral"}
           />
         </Card>
