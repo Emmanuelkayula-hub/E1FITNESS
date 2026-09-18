@@ -7,8 +7,18 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // DATABASE_URL: the pooled connection (e.g. Supabase's PgBouncer port
+  // 6543) — used for normal app queries, safe under serverless's many
+  // short-lived connections.
+  url       = env("DATABASE_URL")
+  // DIRECT_URL: the unpooled connection (e.g. Supabase's port 5432) —
+  // used only for migrations, which PgBouncer's transaction pooling
+  // mode can't run reliably. Prisma requires this env var to be set
+  // whenever directUrl is declared (even to the same value as
+  // DATABASE_URL for a plain, non-pooled Postgres setup) — see
+  // .env.example.
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------------------------------------------------------------------------
