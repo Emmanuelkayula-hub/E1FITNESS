@@ -3,17 +3,22 @@ import { getCurrentUser } from "@/lib/currentUser";
 import type { ReportSnapshot } from "@/lib/data/reports";
 import { Card, CardHeader, StatTile } from "@/components/ui/Card";
 import { ReportGenerateButtons } from "@/components/reports/ReportGenerateButtons";
+import { CsvImportForm } from "@/components/import/CsvImportForm";
 import { formatDate, formatMoney, formatPercent } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReportsPage() {
   const user = await getCurrentUser();
-  const reports = await prisma.report.findMany({
-    where: { userId: user.id },
-    orderBy: { generatedAt: "desc" },
-    take: 12,
-  });
+  const [reports, funds, savingsAccounts] = await Promise.all([
+    prisma.report.findMany({
+      where: { userId: user.id },
+      orderBy: { generatedAt: "desc" },
+      take: 12,
+    }),
+    prisma.investmentFund.findMany({ where: { userId: user.id }, select: { id: true, name: true } }),
+    prisma.savingsAccount.findMany({ where: { userId: user.id }, select: { id: true, name: true } }),
+  ]);
 
   const latest = reports[0];
   const snapshot = latest ? (latest.snapshot as unknown as ReportSnapshot) : null;
@@ -49,6 +54,14 @@ export default async function ReportsPage() {
             Career data
           </a>
         </div>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Import data"
+          subtitle="Preview and validate before anything is written — duplicate and invalid rows are never imported."
+        />
+        <CsvImportForm funds={funds} savingsAccounts={savingsAccounts} />
       </Card>
 
       {reports.length > 0 && (
