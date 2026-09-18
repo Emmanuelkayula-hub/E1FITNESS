@@ -7,7 +7,6 @@ import {
   totalStudyHours,
   questionsPerHour,
   mockAverage,
-  studyHoursPerWeek,
   daysUntilExam,
   hoursRemainingVsTarget,
 } from "@/lib/calculations/studyAnalytics";

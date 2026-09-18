@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { calculateEarlyWithdrawalEstimate } from "@/lib/calculations/lockIn";
 import { formatDate, formatMoney } from "@/lib/format";
 
@@ -26,15 +26,15 @@ export function EarlyWithdrawalCalculator({
   const [selectedId, setSelectedId] = useState(lockedLots[0]?.id ?? "");
   const selected = lockedLots.find((l) => l.id === selectedId);
 
-  const estimate = useMemo(() => {
-    if (!selected || !currentUnitPrice) return null;
-    return calculateEarlyWithdrawalEstimate({
-      units: selected.units,
-      currentUnitPrice,
-      totalContributed: selected.totalContributed,
-      penaltyPercent,
-    });
-  }, [selected, currentUnitPrice, penaltyPercent]);
+  const estimate =
+    selected && currentUnitPrice
+      ? calculateEarlyWithdrawalEstimate({
+          units: selected.units,
+          currentUnitPrice,
+          totalContributed: selected.totalContributed,
+          penaltyPercent,
+        })
+      : null;
 
   if (lockedLots.length === 0) {
     return (

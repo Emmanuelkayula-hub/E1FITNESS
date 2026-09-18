@@ -100,81 +100,89 @@ async function main() {
   });
 
   // Two named data sources so the conflict below has real provenance.
-  const factSheetSource = await prisma.dataSource.create({
-    data: {
-      userId: user.id,
-      name: "Longhorn official fact sheet",
-      sourceType: "USER_DOCUMENT",
-      urlOrDomain: null,
-      description: "User-verified fact sheet obtained directly from Longhorn, 25 Aug 2026",
-      reliability: "High — primary document, user has physical/PDF copy",
-      lastChecked: new Date("2026-08-25"),
-    },
+  // create() (not upsert) is used throughout this block, so it's guarded
+  // by an existence check to keep the whole script idempotent/safe to re-run.
+  const existingConflict = await prisma.dataConflict.findFirst({
+    where: { entityType: "InvestmentFund", entityId: fund.id, field: "twelveMonthReturnPercent" },
   });
 
-  const publicSiteSource = await prisma.dataSource.create({
-    data: {
-      userId: user.id,
-      name: "Longhorn public website (insights page)",
-      sourceType: "THIRD_PARTY",
-      urlOrDomain: "longhorn-associates.com/insights",
-      description:
-        "Public marketing page cited in the user's own Fee Comparison workbook: " +
-        '"Longhorn\'s published 12-month Equity Fund return was 12.4%"',
-      reliability: "Unverified — public marketing content, not a signed fact sheet",
-      lastChecked: new Date("2026-09-01"),
-    },
-  });
+  if (!existingConflict) {
+    const factSheetSource = await prisma.dataSource.create({
+      data: {
+        userId: user.id,
+        name: "Longhorn official fact sheet",
+        sourceType: "USER_DOCUMENT",
+        urlOrDomain: null,
+        description: "User-verified fact sheet obtained directly from Longhorn, 25 Aug 2026",
+        reliability: "High — primary document, user has physical/PDF copy",
+        lastChecked: new Date("2026-08-25"),
+      },
+    });
 
-  const obsA = await prisma.dataObservation.create({
-    data: {
-      sourceId: factSheetSource.id,
-      entityType: "InvestmentFund",
-      entityId: fund.id,
-      field: "twelveMonthReturnPercent",
-      value: "65.59",
-      unit: "%",
-      observedAt: new Date("2026-08-25"),
-      verificationStatus: "VERIFIED",
-      notes: "From the fact sheet handed to the user directly.",
-    },
-  });
+    const publicSiteSource = await prisma.dataSource.create({
+      data: {
+        userId: user.id,
+        name: "Longhorn public website (insights page)",
+        sourceType: "THIRD_PARTY",
+        urlOrDomain: "longhorn-associates.com/insights",
+        description:
+          "Public marketing page cited in the user's own Fee Comparison workbook: " +
+          '"Longhorn\'s published 12-month Equity Fund return was 12.4%"',
+        reliability: "Unverified — public marketing content, not a signed fact sheet",
+        lastChecked: new Date("2026-09-01"),
+      },
+    });
 
-  const obsB = await prisma.dataObservation.create({
-    data: {
-      sourceId: publicSiteSource.id,
-      entityType: "InvestmentFund",
-      entityId: fund.id,
-      field: "twelveMonthReturnPercent",
-      value: "12.4",
-      unit: "%",
-      observedAt: new Date("2026-09-01"),
-      verificationStatus: "UNVERIFIED",
-      notes: "Cited in longhorn-investment-tracker.xlsx, Fee Comparison!A30.",
-    },
-  });
+    const obsA = await prisma.dataObservation.create({
+      data: {
+        sourceId: factSheetSource.id,
+        entityType: "InvestmentFund",
+        entityId: fund.id,
+        field: "twelveMonthReturnPercent",
+        value: "65.59",
+        unit: "%",
+        observedAt: new Date("2026-08-25"),
+        verificationStatus: "VERIFIED",
+        notes: "From the fact sheet handed to the user directly.",
+      },
+    });
 
-  // This is a REAL discrepancy discovered in the user's own spreadsheets —
-  // not manufactured demo data. Preserved as an open conflict per spec §17.
-  await prisma.dataConflict.create({
-    data: {
-      userId: user.id,
-      entityType: "InvestmentFund",
-      entityId: fund.id,
-      field: "twelveMonthReturnPercent",
-      observationAId: obsA.id,
-      observationBId: obsB.id,
-      difference: 53.19,
-      status: "OPEN",
-      resolutionNote:
-        "Two of the user's own source workbooks disagree: the fact sheet " +
-        "(user-verified, 25 Aug 2026) states 65.59%; the Fee Comparison " +
-        "workbook separately cites the public website as stating 12.4% for " +
-        "the same 12-month period. Do not average or silently pick one — " +
-        "ask Longhorn which figure is current and on what basis (see " +
-        "Research > Questions to Ask).",
-    },
-  });
+    const obsB = await prisma.dataObservation.create({
+      data: {
+        sourceId: publicSiteSource.id,
+        entityType: "InvestmentFund",
+        entityId: fund.id,
+        field: "twelveMonthReturnPercent",
+        value: "12.4",
+        unit: "%",
+        observedAt: new Date("2026-09-01"),
+        verificationStatus: "UNVERIFIED",
+        notes: "Cited in longhorn-investment-tracker.xlsx, Fee Comparison!A30.",
+      },
+    });
+
+    // This is a REAL discrepancy discovered in the user's own spreadsheets —
+    // not manufactured demo data. Preserved as an open conflict per spec §17.
+    await prisma.dataConflict.create({
+      data: {
+        userId: user.id,
+        entityType: "InvestmentFund",
+        entityId: fund.id,
+        field: "twelveMonthReturnPercent",
+        observationAId: obsA.id,
+        observationBId: obsB.id,
+        difference: 53.19,
+        status: "OPEN",
+        resolutionNote:
+          "Two of the user's own source workbooks disagree: the fact sheet " +
+          "(user-verified, 25 Aug 2026) states 65.59%; the Fee Comparison " +
+          "workbook separately cites the public website as stating 12.4% for " +
+          "the same 12-month period. Do not average or silently pick one — " +
+          "ask Longhorn which figure is current and on what basis (see " +
+          "Research > Questions to Ask).",
+      },
+    });
+  }
 
   // -------------------------------------------------------------------
   // Savings: FNB Savings Pocket, tier assumptions from Savings!A6:B9
@@ -191,24 +199,27 @@ async function main() {
     },
   });
 
-  const tierData: Array<[number, number | null, number]> = [
-    [100, 249, 3],
-    [250, 499, 3.5],
-    [500, 999, 4],
-    [1000, null, 5],
-  ];
-  for (const [min, max, rate] of tierData) {
-    await prisma.savingsRate.create({
-      data: {
-        accountId: savings.id,
-        balanceBandMin: min,
-        balanceBandMax: max,
-        annualRatePercent: rate,
-        effectiveDate: new Date("2026-08-24"),
-        source: "User's own figures (starter-tracker.xlsx, Savings tab)",
-        verificationStatus: "USER_INPUT",
-      },
-    });
+  const existingRateCount = await prisma.savingsRate.count({ where: { accountId: savings.id } });
+  if (existingRateCount === 0) {
+    const tierData: Array<[number, number | null, number]> = [
+      [100, 249, 3],
+      [250, 499, 3.5],
+      [500, 999, 4],
+      [1000, null, 5],
+    ];
+    for (const [min, max, rate] of tierData) {
+      await prisma.savingsRate.create({
+        data: {
+          accountId: savings.id,
+          balanceBandMin: min,
+          balanceBandMax: max,
+          annualRatePercent: rate,
+          effectiveDate: new Date("2026-08-24"),
+          source: "User's own figures (starter-tracker.xlsx, Savings tab)",
+          verificationStatus: "USER_INPUT",
+        },
+      });
+    }
   }
 
   // -------------------------------------------------------------------
@@ -227,52 +238,61 @@ async function main() {
     },
   });
 
-  const phases: Array<[string, number, number, number, number]> = [
-    ["Phase 1 - Build", 1, 4, 700, 300],
-    ["Phase 2 - Balance", 5, 8, 600, 400],
-    ["Phase 3 - Prepare", 9, 12, 550, 450],
-  ];
-  for (const [label, monthStart, monthEnd, equity, savingsAmt] of phases) {
-    await prisma.contributionPlanPhase.create({
-      data: {
-        planId: plan.id,
-        label,
-        monthStart,
-        monthEnd,
-        equityAmount: equity,
-        savingsAmount: savingsAmt,
-      },
-    });
+  const existingPhaseCount = await prisma.contributionPlanPhase.count({ where: { planId: plan.id } });
+  if (existingPhaseCount === 0) {
+    const phases: Array<[string, number, number, number, number]> = [
+      ["Phase 1 - Build", 1, 4, 700, 300],
+      ["Phase 2 - Balance", 5, 8, 600, 400],
+      ["Phase 3 - Prepare", 9, 12, 550, 450],
+    ];
+    for (const [label, monthStart, monthEnd, equity, savingsAmt] of phases) {
+      await prisma.contributionPlanPhase.create({
+        data: {
+          planId: plan.id,
+          label,
+          monthStart,
+          monthEnd,
+          equityAmount: equity,
+          savingsAmount: savingsAmt,
+        },
+      });
+    }
   }
 
   // -------------------------------------------------------------------
   // Market data: LuSE All Share Index baseline observation
   // -------------------------------------------------------------------
-  await prisma.marketIndex.create({
-    data: {
-      code: "LASI",
-      name: "LuSE All Share Index",
-      date: new Date("2026-08-24"),
-      level: 26423.95,
-      source: "luse.co.zm",
-      sourceType: "THIRD_PARTY",
-      retrievedAt: new Date("2026-08-25"),
-    },
-  });
+  const existingLasi = await prisma.marketIndex.findFirst({ where: { code: "LASI" } });
+  if (!existingLasi) {
+    await prisma.marketIndex.create({
+      data: {
+        code: "LASI",
+        name: "LuSE All Share Index",
+        date: new Date("2026-08-24"),
+        level: 26423.95,
+        source: "luse.co.zm",
+        sourceType: "THIRD_PARTY",
+        retrievedAt: new Date("2026-08-25"),
+      },
+    });
+  }
 
-  await prisma.dividend.create({
-    data: {
-      instrumentCode: "LASI",
-      exDate: new Date("2026-08-24"),
-      yieldPercent: 4,
-      source: "User's own estimate (starter-tracker.xlsx, Benchmark!B15)",
-      verificationStatus: "ESTIMATED",
-      notes:
-        "LASI counts share prices only, no dividends. This estimated yield " +
-        "is added back to build a dividend-adjusted approximation — see " +
-        "/docs/CALCULATIONS.md, calculateDividendAdjustedIndex.",
-    },
-  });
+  const existingDividend = await prisma.dividend.findFirst({ where: { instrumentCode: "LASI" } });
+  if (!existingDividend) {
+    await prisma.dividend.create({
+      data: {
+        instrumentCode: "LASI",
+        exDate: new Date("2026-08-24"),
+        yieldPercent: 4,
+        source: "User's own estimate (starter-tracker.xlsx, Benchmark!B15)",
+        verificationStatus: "ESTIMATED",
+        notes:
+          "LASI counts share prices only, no dividends. This estimated yield " +
+          "is added back to build a dividend-adjusted approximation — see " +
+          "/docs/CALCULATIONS.md, calculateDividendAdjustedIndex.",
+      },
+    });
+  }
 
   // -------------------------------------------------------------------
   // Application settings — defaults that mirror the workbook assumptions
