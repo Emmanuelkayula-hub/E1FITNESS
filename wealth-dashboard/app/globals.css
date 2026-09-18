@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --surface-muted: #f1f3f6;
+  --border: #e2e5eb;
+  --foreground: #14171f;
+  --muted: #5b6472;
+  --muted-2: #8a93a2;
+
+  --accent: #1e4ed8;
+  --accent-soft: #e8edfc;
+  --positive: #0f7a4c;
+  --positive-soft: #e5f6ee;
+  --negative: #b3261e;
+  --negative-soft: #fdecea;
+  --warning: #9a6300;
+  --warning-soft: #fff4dd;
+
+  --radius: 10px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-2: var(--muted-2);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-positive: var(--positive);
+  --color-positive-soft: var(--positive-soft);
+  --color-negative: var(--negative);
+  --color-negative-soft: var(--negative-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-mono-plex);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0c0e12;
+    --surface: #14171d;
+    --surface-muted: #191d24;
+    --border: #262b34;
+    --foreground: #e7e9ee;
+    --muted: #9aa3b2;
+    --muted-2: #6b7382;
+
+    --accent: #6f95fb;
+    --accent-soft: #1c2540;
+    --positive: #3fce8f;
+    --positive-soft: #10291f;
+    --negative: #ef6a63;
+    --negative-soft: #341615;
+    --warning: #e0b04b;
+    --warning-soft: #322608;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: var(--font-mono), ui-monospace, "SFMono-Regular", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--accent);
+  color: white;
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-accent;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-md border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-surface-muted;
+  }
+  .table-base {
+    @apply w-full border-collapse text-sm;
+  }
+  .table-base th {
+    @apply border-b border-border px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted;
+  }
+  .table-base td {
+    @apply border-b border-border px-3 py-2 align-top;
+  }
+}
