@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { writeAuditLog } from "@/lib/data/auditLog";
+import { describeConflictField } from "@/lib/data/entityLabels";
 
 export async function getDataSourcesForUser(userId: string) {
   return prisma.dataSource.findMany({
@@ -15,15 +16,19 @@ export async function getConflictsForUser(userId: string, status?: string) {
     orderBy: { createdAt: "desc" },
   });
 
-  // Hydrate each side's observation + source (small N, simple sequential fetch
-  // is fine — this page is not on a hot path).
+  // Hydrate each side's observation + source, and resolve a human-readable
+  // label (e.g. "Longhorn Associates Equity Fund — 12-month return") so
+  // the UI never has to render the raw entityType/field pair. Small N,
+  // simple sequential fetch per conflict is fine — this page is not on a
+  // hot path.
   const hydrated = await Promise.all(
     conflicts.map(async (c) => {
-      const [obsA, obsB] = await Promise.all([
+      const [obsA, obsB, label] = await Promise.all([
         prisma.dataObservation.findUnique({ where: { id: c.observationAId }, include: { source: true } }),
         prisma.dataObservation.findUnique({ where: { id: c.observationBId }, include: { source: true } }),
+        describeConflictField(c.entityType, c.entityId, c.field),
       ]);
-      return { conflict: c, obsA, obsB };
+      return { conflict: c, obsA, obsB, label };
     })
   );
 

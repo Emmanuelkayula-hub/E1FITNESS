@@ -41,13 +41,11 @@ export default async function ResearchPage() {
           <p className="text-sm text-muted">No open conflicts.</p>
         ) : (
           <div className="space-y-6">
-            {openConflicts.map(({ conflict, obsA, obsB }) => (
+            {openConflicts.map(({ conflict, obsA, obsB, label }) => (
               <div key={conflict.id} className="rounded-md border border-negative/30 bg-negative-soft p-4">
                 <div className="mb-2 flex items-center gap-2">
                   <Badge tone="conflicting">DATA CONFLICT</Badge>
-                  <span className="text-sm font-semibold">
-                    {conflict.entityType} — {conflict.field}
-                  </span>
+                  <span className="text-sm font-semibold">{label}</span>
                 </div>
                 <div className="mb-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <ObservationCard label="Source A" obs={obsA} />
@@ -81,11 +79,9 @@ export default async function ResearchPage() {
               </tr>
             </thead>
             <tbody>
-              {resolvedConflicts.map(({ conflict }) => (
+              {resolvedConflicts.map(({ conflict, label }) => (
                 <tr key={conflict.id}>
-                  <td>
-                    {conflict.entityType} — {conflict.field}
-                  </td>
+                  <td>{label}</td>
                   <td>{STATUS_LABEL[conflict.status]}</td>
                   <td className="mono">{conflict.resolvedAt ? formatDate(conflict.resolvedAt) : "—"}</td>
                   <td className="text-muted">{conflict.resolutionNote ?? "—"}</td>
