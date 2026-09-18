@@ -73,6 +73,7 @@ export default async function ReportsPage() {
                 <th>Type</th>
                 <th>Period</th>
                 <th>Generated</th>
+                <th>PDF</th>
               </tr>
             </thead>
             <tbody>
@@ -83,6 +84,11 @@ export default async function ReportsPage() {
                     {formatDate(r.periodStart)} – {formatDate(r.periodEnd)}
                   </td>
                   <td className="mono">{formatDate(r.generatedAt)}</td>
+                  <td>
+                    <a className="text-accent underline" href={`/api/reports/${r.id}/pdf`}>
+                      Download
+                    </a>
+                  </td>
                 </tr>
               ))}
             </tbody>

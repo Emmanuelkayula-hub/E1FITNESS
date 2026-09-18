@@ -53,6 +53,14 @@ unit-mismatch bug can't regress silently again.
 - **No load/performance tests.** The Monte Carlo engine was timed once
   manually (10,000 simulations in ~67ms on this machine) but there's no
   regression guard against that getting slower.
+- **PDF output was validated structurally, not visually.** `file
+  /tmp/test-report.pdf` confirmed a well-formed single-page PDF 1.3
+  document, and the data it renders is the same `ReportSnapshot` already
+  verified correct elsewhere — but no `pdftotext`/screenshot tool was
+  available in this sandbox (`apt-get install poppler-utils` and a `pip`
+  fallback both failed to reach a package mirror), so the actual laid-out
+  page was never visually confirmed. Worth opening one generated PDF by
+  hand before relying on it.
 
 ## Manual verification log (spec §89 quality-control checklist)
 

@@ -61,14 +61,16 @@ npm run db:studio          # Prisma Studio, browse the DB visually
   `APP_USER_EMAIL`. Do not deploy this publicly without putting it behind
   some access control (e.g. Vercel password protection).
 - **No live external data feed.** LuSE and Longhorn prices are entered
-  manually or (not yet built) via CSV import — see DATA_SOURCES.md for
-  the provider abstraction this is designed to slot into.
-- **No CSV import UI.** CSV *export* works (Reports page). Import (spec
-  §49) was not built in this session — see the final status report.
-- **No PDF export.** Reports render as a printable page (browser
-  print-to-PDF works); no server-side PDF generation library was added.
-- **No end-to-end (Playwright) tests.** Every module was manually
-  smoke-tested against the real dev database instead — see TESTING.md.
+  manually or via CSV import (Reports page) — see DATA_SOURCES.md for
+  the provider abstraction this is designed to slot into next.
+- **PDF export exists but wasn't visually/text verified by an automated
+  renderer.** `lib/pdf/reportPdf.ts` (pdfkit) is confirmed to produce a
+  structurally valid PDF (checked with `file`), and it maps the exact
+  same `ReportSnapshot` data already verified correct on the Reports
+  page — but no `pdftotext`/screenshot-based check confirmed the
+  rendered layout, because this sandbox had no PDF-rendering tool
+  available and couldn't reach one via `apt`/`pip`. Worth a manual look
+  before relying on it.
 
 ## Deployment
 
