@@ -196,8 +196,7 @@ function ObservationCard({
     <div className="rounded-md bg-surface p-3">
       <p className="text-xs font-medium text-muted">{label}</p>
       <p className="mono text-lg font-semibold">
-        {obs.value}
-        {obs.unit}
+        {obs.unit === "K" ? `K${obs.value}` : `${obs.value}${obs.unit ?? ""}`}
       </p>
       <p className="text-xs text-muted">{obs.source.name}</p>
       <p className="text-xs text-muted-2">{formatDate(obs.observedAt)}</p>
