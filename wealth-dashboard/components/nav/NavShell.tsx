@@ -24,7 +24,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
       {/* Desktop sidebar */}
       <aside className="hidden w-60 shrink-0 border-r border-border bg-surface md:flex md:flex-col">
         <div className="px-5 py-6">
-          <div className="text-sm font-bold uppercase tracking-widest text-accent">EK WEALTH</div>
+          <div className="text-sm font-bold uppercase tracking-widest text-black">EK WEALTH</div>
           <div className="text-xs text-muted-2">& Career Dashboard</div>
         </div>
         <nav className="flex-1 space-y-0.5 px-3">
@@ -56,7 +56,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
 
       {/* Mobile top bar */}
       <header className="flex items-center justify-between border-b border-border bg-surface px-4 py-3 md:hidden">
-        <div className="text-sm font-bold uppercase tracking-widest text-accent">EK WEALTH</div>
+        <div className="text-sm font-bold uppercase tracking-widest text-black">EK WEALTH</div>
       </header>
 
       <main className="flex-1 pb-20 md:pb-0">
