@@ -24,13 +24,12 @@ test.describe("Research — data conflict engine", () => {
 
   test("the real Longhorn 65.59%-vs-12.4% conflict is visible and resolvable", async ({ page }) => {
     await page.goto("/research");
-    await expect(page.getByText("DATA CONFLICT", { exact: true })).toBeVisible();
+    await expect(page.getByText("DATA CONFLICT", { exact: true }).first()).toBeVisible();
 
-    const conflictBlock = page.locator("div", { has: page.getByText("DATA CONFLICT", { exact: true }) }).first();
-    // Scoped to the conflict card itself, .first() because the resolution
-    // note's prose also mentions both figures — "65.59%"/"12.4%" also
-    // appear separately further down the page in the Fund research
-    // profile section.
+    // Other open conflicts (e.g. unit price) render as sibling cards, so
+    // scope to the one card for the 12-month return field.
+    const conflictBlock = page.locator("div.bg-negative-soft").filter({ hasText: "12-month return" });
+    await expect(conflictBlock).toHaveCount(1);
     await expect(conflictBlock.getByText("65.59").first()).toBeVisible();
     await expect(conflictBlock.getByText("12.4").first()).toBeVisible();
     await conflictBlock.locator('select[name="resolution"]').selectOption("keep_both");
@@ -41,7 +40,7 @@ test.describe("Research — data conflict engine", () => {
     // content directly — no client-visible "Saved." transition to wait
     // on here (unlike simpler forms elsewhere), so assert the definitive
     // outcome instead: the conflict moves out of "open" into the audit trail.
-    await expect(page.getByText("No open conflicts.")).toBeVisible({ timeout: 10_000 });
+    await expect(conflictBlock).toHaveCount(0, { timeout: 10_000 });
     await expect(page.getByRole("heading", { name: "Resolved conflicts" })).toBeVisible();
 
     // Reset back to OPEN via the API so the rest of the suite (and manual

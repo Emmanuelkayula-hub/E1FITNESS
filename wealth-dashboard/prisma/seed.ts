@@ -184,6 +184,89 @@ async function main() {
     });
   }
 
+  const existingUnitPriceConflict = await prisma.dataConflict.findFirst({
+    where: { entityType: "InvestmentFund", entityId: fund.id, field: "unitPrice" },
+  });
+
+  if (!existingUnitPriceConflict) {
+    const factSheetSource =
+      (await prisma.dataSource.findFirst({ where: { userId: user.id, name: "Longhorn official fact sheet" } })) ??
+      (await prisma.dataSource.create({
+        data: {
+          userId: user.id,
+          name: "Longhorn official fact sheet",
+          sourceType: "USER_DOCUMENT",
+          description: "User-verified fact sheet obtained directly from Longhorn, 25 Aug 2026",
+          reliability: "High — primary document, user has physical/PDF copy",
+          lastChecked: new Date("2026-08-25"),
+        },
+      }));
+
+    const publicSiteSource =
+      (await prisma.dataSource.findFirst({
+        where: { userId: user.id, name: "Longhorn public website (insights page)" },
+      })) ??
+      (await prisma.dataSource.create({
+        data: {
+          userId: user.id,
+          name: "Longhorn public website (insights page)",
+          sourceType: "THIRD_PARTY",
+          urlOrDomain: "longhorn-associates.com",
+          description: "Public Longhorn website product pages",
+          reliability: "Unverified — public marketing content, not a signed fact sheet",
+          lastChecked: new Date("2026-09-22"),
+        },
+      }));
+
+    const priceA = await prisma.dataObservation.create({
+      data: {
+        sourceId: factSheetSource.id,
+        entityType: "InvestmentFund",
+        entityId: fund.id,
+        field: "unitPrice",
+        value: "8.03",
+        unit: "K",
+        observedAt: new Date("2026-08-25"),
+        verificationStatus: "VERIFIED",
+        notes: "From the fact sheet handed to the user directly.",
+      },
+    });
+
+    const priceB = await prisma.dataObservation.create({
+      data: {
+        sourceId: publicSiteSource.id,
+        entityType: "InvestmentFund",
+        entityId: fund.id,
+        field: "unitPrice",
+        value: "1.25",
+        unit: "K",
+        // The website shows no "as of" date; this is the date it was found.
+        observedAt: new Date("2026-09-22"),
+        verificationStatus: "UNVERIFIED",
+        notes:
+          "Equity Fund listing on longhorn-associates.com/products (found via web search, " +
+          "not read directly). Listed alongside the 12.4% 12-month return. No date shown.",
+      },
+    });
+
+    await prisma.dataConflict.create({
+      data: {
+        userId: user.id,
+        entityType: "InvestmentFund",
+        entityId: fund.id,
+        field: "unitPrice",
+        observationAId: priceA.id,
+        observationBId: priceB.id,
+        difference: 6.78,
+        status: "OPEN",
+        resolutionNote:
+          "The fact sheet (25 Aug 2026) gives K8.03 per unit; the public website lists K1.25 " +
+          "with no date — more than 6x lower, which suggests the website figures are stale. " +
+          "Ask Longhorn for today's unit price and why the website shows K1.25.",
+      },
+    });
+  }
+
   // -------------------------------------------------------------------
   // Savings: FNB Savings Pocket, tier assumptions from Savings!A6:B9
   // -------------------------------------------------------------------
@@ -315,7 +398,7 @@ async function main() {
   console.log("Seed complete.");
   console.log(`User: ${user.email} (${user.id})`);
   console.log(`Fund: ${fund.name} (${fund.id})`);
-  console.log("Seeded 1 open DataConflict: Longhorn 12-month return, 65.59% vs 12.4%.");
+  console.log("Seeded open DataConflicts: Longhorn 12-month return (65.59% vs 12.4%), unit price (K8.03 vs K1.25).");
 }
 
 main()
