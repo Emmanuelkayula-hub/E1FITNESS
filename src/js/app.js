@@ -2221,7 +2221,7 @@ renderers.dashboard = function(){
           ${weight.remaining!=null ? `<div class="sub" style="margin-top:8px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction}`}</div>` : `<div class="sub" style="margin-top:8px;">Set a goal weight in Settings → Profile</div>`}
           ${weightChange ? `<div class="sub" style="margin-top:2px;">${weightChange.deltaLbs===0?'No change':`${weightChange.deltaLbs>0?'+':'-'}${fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))} ${unitLabel()}`} over the last ${weightChange.spanDays} day${weightChange.spanDays===1?'':'s'}</div>` : ''}
         </div>
-        <div>${sparklineSVG(weight.points, '#5A87F5')}</div>
+        <div>${sparklineSVG(weight.points, 'var(--blue)')}</div>
       </div>
       <button class="btn btn-primary btn-block" id="logWeightBtn" style="margin-top:10px;">Log Today's Weight</button>
       <div class="week-summary-row">
@@ -2327,7 +2327,7 @@ function lineChartSVG(series, opts={}){
   let refLineSvg = '';
   if(opts.refLine){
     const ry = yScale(opts.refLine.y);
-    const color = opts.refLine.color || '#3BD182';
+    const color = opts.refLine.color || 'var(--green)';
     refLineSvg = `<line x1="${pad}" y1="${ry.toFixed(1)}" x2="${w-pad}" y2="${ry.toFixed(1)}" stroke="${color}" stroke-width="1.5" stroke-dasharray="5 4"/>
       <text x="${w-pad}" y="${(ry-6).toFixed(1)}" text-anchor="end" font-size="10" fill="${color}" font-family="IBM Plex Mono, monospace">${escapeHtml(opts.refLine.label||'')}</text>`;
   }
@@ -2367,7 +2367,7 @@ function sparklineSVG(points, color, w=140, h=40){
 /* =========================================================
    WORKOUT MODULE
    ========================================================= */
-let wk = { view:'home', routineId:null, exerciseId:null, editingRoutineDraft:null, historyDate:null, statExId:null, editingProgramDraft:null, programId:null };
+let wk = { view:'home', routineId:null, exerciseId:null, editingRoutineDraft:null, historyDate:null, statExId:null, editingProgramDraft:null, programId:null, justFinishedSessionId:null };
 
 function exTypeLabel(t){
   return {weight_reps:'Weight × Reps', bodyweight:'Bodyweight', assisted:'Assisted Bodyweight', duration:'Duration', cardio:'Cardio'}[t]||t;
@@ -2625,16 +2625,16 @@ function prStatBoxesHtml(type, prs){
    chart for a plank or a jog is worse than no chart at all. */
 function prChartHtml(type, prs){
   if(type==='weight_reps'){
-    return `<div class="card"><div class="card-title">Est. 1RM Progression</div>${lineChartSVG([{label:'Est. 1RM ('+unitLabel()+')', color:'#5A87F5', points:prs.oneRMPoints.map(p=>({x:new Date(p.date).getTime(), y:toDisplayWeight(p.value)}))}])}</div>`;
+    return `<div class="card"><div class="card-title">Est. 1RM Progression</div>${lineChartSVG([{label:'Est. 1RM ('+unitLabel()+')', color:'var(--blue)', points:prs.oneRMPoints.map(p=>({x:new Date(p.date).getTime(), y:toDisplayWeight(p.value)}))}])}</div>`;
   }
   if(type==='bodyweight'){
-    return `<div class="card"><div class="card-title">Best Reps Progression</div>${lineChartSVG([{label:'Reps', color:'#3BD182', points:prs.repPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
+    return `<div class="card"><div class="card-title">Best Reps Progression</div>${lineChartSVG([{label:'Reps', color:'var(--green)', points:prs.repPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
   }
   if(type==='duration'){
     return `<div class="card"><div class="card-title">Best Hold Progression</div>${lineChartSVG([{label:'Seconds', color:'#F59A4B', points:prs.durationPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
   }
   if(type==='cardio'){
-    return prs.distancePoints.length ? `<div class="card"><div class="card-title">Best Distance Progression</div>${lineChartSVG([{label:'Distance', color:'#5A87F5', points:prs.distancePoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>` : '';
+    return prs.distancePoints.length ? `<div class="card"><div class="card-title">Best Distance Progression</div>${lineChartSVG([{label:'Distance', color:'var(--blue)', points:prs.distancePoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>` : '';
   }
   return ''; // assisted: a "lower is better" trend doesn't fit the standard chart — the stat box above is enough
 }
@@ -2650,11 +2650,11 @@ function prChartHtml(type, prs){
    - cardio: longest single-set distance, where logged.
    Warm-up sets never contribute (isWorkingSet excludes them), so they can
    never inflate volume, 1RM or any of the type-specific bests. */
-function computePRs(exerciseId){
+function computePRs(exerciseId, sessions=DB.sessions){
   let maxWeight=0, best1RM=0, maxVolume=0, count=0;
   let maxReps=0, minAssistWeight=null, maxDuration=0, maxDistance=0;
   const oneRMPoints=[], repPoints=[], durationPoints=[], distancePoints=[];
-  DB.sessions.forEach(s=>{
+  sessions.forEach(s=>{
     (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
       if(exEntry.exerciseId!==exerciseId) return;
       let sessionVol=0, sessionBest1RM=0, sessionMaxReps=0, sessionMaxDuration=0, sessionMaxDistance=0;
@@ -2691,6 +2691,37 @@ function computePRs(exerciseId){
     }));
   });
   return {maxWeight, best1RM, maxVolume, count, oneRMPoints, maxReps, repPoints, minAssistWeight, maxDuration, durationPoints, maxDistance, distancePoints};
+}
+
+/* V31: "which exercises in this specific (any, past or just-finished)
+   session set an all-time-as-of-then estimated-1RM best" -- reused by both
+   the workout-completion view and plain workout-history detail, so a PR
+   earned last month shows up exactly the same way as one earned just now.
+   Compares only against sessions strictly before this one chronologically
+   (never itself, never anything later), so re-opening an old workout can't
+   retroactively "gain" a PR a later session already broke. weight_reps
+   exercises only, same as the real-time PR toast -- 1RM estimation doesn't
+   apply to the other exercise types. */
+function sessionPRsAchieved(s){
+  const priorSessions = DB.sessions.filter(x=> x.id!==s.id && (x.date<s.date || (x.date===s.date && (x.startedAt||0)<(s.startedAt||0))));
+  const results = [];
+  (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
+    if(exEntry.exType!=='weight_reps') return;
+    const e = exById(exEntry.exerciseId);
+    if(!e) return;
+    let sessionBest1RM=0, bestSet=null;
+    (exEntry.sets||[]).forEach(set=>{
+      if(!isWorkingSet(set) || set.weight==null || set.reps==null) return;
+      const orm = estimate1RM(set.weight, set.reps);
+      if(orm>sessionBest1RM){ sessionBest1RM=orm; bestSet=set; }
+    });
+    if(sessionBest1RM<=0) return;
+    const priorBest1RM = computePRs(exEntry.exerciseId, priorSessions).best1RM;
+    if(sessionBest1RM>priorBest1RM){
+      results.push({exerciseId:exEntry.exerciseId, name:e.name, weight:bestSet.weight, reps:bestSet.reps, est1RM:sessionBest1RM, priorBest1RM});
+    }
+  }));
+  return results;
 }
 
 /* Real-time PR toast, fired the instant a set is checked off — not just at
@@ -3669,13 +3700,34 @@ function renderActiveSession(root){
   // -- that full rebuild is deliberately avoided on check-toggle (see FIX #1
   // below) to preserve scroll position/focus on mobile. This only flips a
   // few classList/hidden values on already-rendered nodes.
+  function swapRowMarkup(row, isCurrent){
+    // V29's current-set row uses structurally different markup (stepper
+    // wrapper + expand button) from a plain row, not just a different
+    // class -- a class-only toggle here left the newly-current row's bare
+    // <input> elements with .set-row.current's flex-wrap styling applied
+    // but no stepper wrapper to size against, collapsing each input onto
+    // its own full-width line. Regenerating just the two affected rows'
+    // outerHTML (not the whole exercise list) keeps this cheap while
+    // fixing that.
+    const gi = parseInt(row.dataset.gi), ii = parseInt(row.dataset.ii), si = parseInt(row.dataset.si);
+    const entry = s.groups[gi][ii];
+    const e = exById(entry.exerciseId);
+    const prevSet = e ? previousSetsForExercise(e.id, s.id)[si] : null;
+    row.outerHTML = setRowHtml(entry.exType, entry.sets[si], si, gi, ii, prevSet, isCurrent);
+    // outerHTML replaces `row` with a fresh, listener-less element -- wire
+    // only that one row rather than re-scanning/re-wiring every row in the
+    // list (which would stack duplicate listeners on rows that didn't change).
+    const wrap = $('#exBlocks');
+    const fresh = $(`.set-row[data-gi="${gi}"][data-ii="${ii}"][data-si="${si}"]`, wrap);
+    if(fresh) wireRow(fresh);
+  }
   function advanceCurrentHighlight(){
     const wrap = $('#exBlocks');
     if(!wrap) return;
     const prevBlock = $('.exercise-block.current', wrap);
     if(prevBlock){ prevBlock.classList.remove('current'); const chip = $('.current-chip', prevBlock); if(chip) chip.hidden = true; }
     const prevRow = $('.set-row.current', wrap);
-    if(prevRow) prevRow.classList.remove('current');
+    if(prevRow) swapRowMarkup(prevRow, false);
     outer: for(let gi=0; gi<s.groups.length; gi++){
       for(let ii=0; ii<s.groups[gi].length; ii++){
         const entry = s.groups[gi][ii];
@@ -3684,14 +3736,16 @@ function renderActiveSession(root){
         const block = $('#ex-'+gi+'-'+ii, wrap);
         if(block){ block.classList.add('current'); const chip = $('.current-chip', block); if(chip) chip.hidden = false; }
         const row = $(`.set-row[data-gi="${gi}"][data-ii="${ii}"][data-si="${si}"]`, wrap);
-        if(row) row.classList.add('current');
+        if(row) swapRowMarkup(row, true);
         break outer;
       }
     }
   }
 
   function wireSetRowEvents(){
-    $$('.set-row').forEach(row=>{
+    $$('.set-row').forEach(wireRow);
+  }
+  function wireRow(row){
       const gi = parseInt(row.dataset.gi), ii = parseInt(row.dataset.ii), si = parseInt(row.dataset.si);
       const entry = s.groups[gi][ii];
       const set = entry.sets[si];
@@ -3808,7 +3862,6 @@ function renderActiveSession(root){
           }}});
         });
       }
-    });
   }
 }
 
@@ -4181,21 +4234,18 @@ function openFinishSheet(){
 function completeSession(){
   const s = DB.activeSession;
   s.durationMin = Math.max(1, Math.round((Date.now()-s.startedAt)/60000));
-  const prevPRs = {};
-  s.groups.forEach(g=>g.forEach(e=>{ prevPRs[e.exerciseId] = computePRs(e.exerciseId); }));
   DB.sessions.push(s);
   DB.activeSession = null;
   save();
-  let newPRcount = 0;
-  s.groups.forEach(g=>g.forEach(e=>{
-    const before = prevPRs[e.exerciseId];
-    const after = computePRs(e.exerciseId);
-    if(after.best1RM > before.best1RM) newPRcount++;
-  }));
+  const newPRcount = sessionPRsAchieved(s).length; // same derivation the completion detail view uses -- one source of truth for "was this a PR"
   toast(newPRcount>0? `Workout saved — ${newPRcount} new PR${newPRcount>1?'s':''}! 🎉` : 'Workout saved');
   stopRestTimer();
   stopElapsedTimer();
-  wkNav('home');
+  // V31: land on a real completion summary (duration/volume/sets/PRs,
+  // reusing the same detail view plain history uses) instead of a bare
+  // toast + Workout Home -- "justFinishedSessionId" only changes the
+  // header text ("X Complete") for this one visit, it's not stored.
+  wkNav('session-detail', {historyDate: s.id, justFinishedSessionId: s.id});
 }
 
 /* ---------------- History ---------------- */
@@ -4217,9 +4267,24 @@ function renderWkHistory(root){
 function renderSessionDetail(root){
   const s = DB.sessions.find(x=>x.id===wk.historyDate);
   if(!s){ wkNav('history'); return; }
-  root.innerHTML = backHeader(s.routineName, ()=> wkNav('history'), `<button class="icon-btn" id="delSess" aria-label="Delete workout" style="width:34px;height:34px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg></button>`);
+  const justFinished = wk.justFinishedSessionId===s.id;
+  wk.justFinishedSessionId = null; // one-time -- reopening this same workout later is plain history, not a completion moment
+  const prog = sessionSetProgress(s);
+  const prs = sessionPRsAchieved(s);
+  const backTarget = ()=> wkNav(justFinished? 'home' : 'history');
+  root.innerHTML = backHeader(justFinished? (s.routineName+' Complete') : s.routineName, backTarget, `<button class="icon-btn" id="delSess" aria-label="Delete workout" style="width:34px;height:34px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg></button>`);
   root.innerHTML += `
-    <div class="sub" style="margin-bottom:10px;">${dateLabel(s.date)} · ${s.durationMin} min</div>
+    <div class="sub" style="margin-bottom:10px;">${dateLabel(s.date)} · ${s.durationMin} min${s.programId?` · ${escapeHtml(s.programName||'Program')}${s.programWeek?` · Week ${s.programWeek}`:''}${s.programPhase?` · ${escapeHtml(s.programPhase)}`:''}`:''}</div>
+    <div class="stat-grid" style="margin-bottom:12px;">
+      <div class="stat-box"><div class="sv" style="color:var(--blue);">${s.durationMin}</div><div class="sl">Minutes</div></div>
+      <div class="stat-box"><div class="sv" style="color:var(--ember);">${fmtInt(toDisplayWeight(sessionVolume(s)))}</div><div class="sl">${unitLabel()} volume</div></div>
+      <div class="stat-box"><div class="sv">${prog.done}/${prog.total}</div><div class="sl">Sets done</div></div>
+      <div class="stat-box"><div class="sv">${prs.length}</div><div class="sl">PR${prs.length===1?'':'s'}</div></div>
+    </div>
+    ${prs.length? `<div class="card">
+      <div class="card-title">Highlights</div>
+      ${prs.map(p=>`<div class="ex-suggest ex-suggest-up" style="margin:0 0 8px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SUGGEST_ICON_PATHS.up}</svg><span class="ll-lbl">PR</span><span class="ll-val">${escapeHtml(p.name)} — ${fmt1(toDisplayWeight(p.weight))} ${unitLabel()} × ${p.reps}${p.priorBest1RM>0?` (est. 1RM up from ${fmtInt(toDisplayWeight(p.priorBest1RM))} to ${fmtInt(toDisplayWeight(p.est1RM))} ${unitLabel()})`:''}</span></div>`).join('')}
+    </div>` : ''}
     ${s.groups.map(g=>g.map(exEntry=>{
       const e = exById(exEntry.exerciseId);
       return `<div class="exercise-block"><div class="ex-head"><span class="ex-name">${escapeHtml(e?e.name:'?')}</span></div>
@@ -4228,8 +4293,11 @@ function renderSessionDetail(root){
       </table></div>`;
     }).join('')).join('')}
     ${s.notes? `<div class="card"><div class="card-title">Notes</div><p style="font-size:13.5px;margin:0;">${escapeHtml(s.notes)}</p></div>`:''}
+    ${justFinished? `<button class="btn btn-primary btn-block" id="doneBtn" style="margin-top:4px;">Done</button>` : ''}
   `;
-  wireBack(()=> wkNav('history'));
+  wireBack(backTarget);
+  const doneBtn = $('#doneBtn');
+  if(doneBtn) doneBtn.addEventListener('click', ()=> wkNav('home'));
   $('#delSess').addEventListener('click', ()=>{
     openConfirmModal('This workout log will be permanently deleted, including its sets and PRs.', ()=>{
       DB.sessions = DB.sessions.filter(x=>x.id!==s.id); save(); wkNav('history');
@@ -5085,7 +5153,7 @@ let progressHistoryExpanded = false;
 // V29: a fixed, repeating color per muscle-group row (bar + dot), purely
 // decorative categorization -- never the only signal for anything (the
 // category name label is always shown alongside it).
-const MUSCLE_DOT_COLORS = ['#5A87F5','#3BD182','#F59A4B','#B073F0','#F06AA6'];
+const MUSCLE_DOT_COLORS = ['var(--blue)','var(--green)','var(--ember)','#B073F0','#F06AA6'];
 
 renderers.progress = function(){
   const root = $('#screen-progress');
@@ -5096,7 +5164,7 @@ renderers.progress = function(){
   const weightPoints = chartMeasurements.filter(m=>m.weight!=null).map(m=>({x:new Date(m.date).getTime(), y:toDisplayWeight(m.weight)}));
   const latest = sorted[sorted.length-1]; // stat boxes always reflect the true latest entry, independent of the chart's range filter
   const weight = weightSummary();
-  const goalLine = weight.goalLbs!=null ? {y: toDisplayWeight(weight.goalLbs), label:'Goal '+fmt1(toDisplayWeight(weight.goalLbs))+' '+unitLabel(), color:'#3BD182'} : null;
+  const goalLine = weight.goalLbs!=null ? {y: toDisplayWeight(weight.goalLbs), label:'Goal '+fmt1(toDisplayWeight(weight.goalLbs))+' '+unitLabel(), color:'var(--green)'} : null;
 
   const historyAll = [...sorted].reverse();
   const historyRows = progressHistoryExpanded ? historyAll : historyAll.slice(0, PROGRESS_HISTORY_PAGE);
@@ -5129,7 +5197,7 @@ renderers.progress = function(){
       <div class="range-row" role="group" aria-label="Chart time range">
         ${PROGRESS_RANGES.map(r=>`<button class="range-chip ${r.key===progressChartRange?'active':''}" data-range="${r.key}" aria-pressed="${r.key===progressChartRange}">${r.key}</button>`).join('')}
       </div>
-      ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'#5A87F5', points:weightPoints}], {autoRange:true, refLine:goalLine, emptyTitle:'No weight history yet', emptySub:'Log your first measurement to start tracking your trend.'})}
+      ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'var(--blue)', points:weightPoints}], {autoRange:true, refLine:goalLine, emptyTitle:'No weight history yet', emptySub:'Log your first measurement to start tracking your trend.'})}
       ${weightChange ? `<div class="sub" style="margin-top:8px;">${weightChange.deltaLbs===0?'No change':`${weightChange.deltaLbs>0?'Up':'Down'} ${fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))} ${unitLabel()}`} over the selected range (${weightChange.spanDays} day${weightChange.spanDays===1?'':'s'})</div>` : ''}
       ${weight.remaining!=null ? `<div class="sub" style="margin-top:4px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction==='lose'?'go (losing)':'go (gaining)'}`}</div>` : ''}
     </div>

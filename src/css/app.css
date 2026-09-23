@@ -66,7 +66,14 @@ input,select,textarea{font-family:inherit;}
 ::-webkit-scrollbar-thumb{background:var(--surface-3);border-radius:8px;}
 ::-webkit-scrollbar-track{background:transparent;}
 
-h1,h2,h3,h4{font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:0.02em;margin:0;font-weight:600;}
+/* Baseline line-height for every heading -- previously unset (browser
+   default), which is tight enough that a heading wrapping to two lines
+   (a long exercise/routine/program name) could read as cramped. 1.15 keeps
+   single-line headings visually unchanged while giving wrapped ones real
+   separation between lines. Components needing a different rhythm (e.g.
+   .hero-title, .ex-name) already set their own line-height and win via
+   specificity/source order below. */
+h1,h2,h3,h4{font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:0.02em;margin:0;font-weight:600;line-height:1.15;}
 .mono{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-variant-numeric:tabular-nums;}
 a{color:inherit;}
 .hidden{display:none !important;}
@@ -156,7 +163,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .screen.rest-padding{padding-bottom:128px;}
 .screen-head{margin:6px 0 16px 0;}
 .screen-head h1{font-size:26px;color:var(--paper);}
-.screen-head .sub{color:var(--muted);font-size:13px;margin-top:2px;}
+/* .sub is the app's general secondary/supporting-text style, used ~50
+   places (card subtitles, program week/phase lines, empty-state body text,
+   etc.) -- it was previously only defined scoped to .screen-head, so every
+   other instance silently fell back to plain body text (full-size,
+   full-contrast) instead of reading as secondary information. That's the
+   real cause of the "everything looks equally important" flatness in
+   several cards, not a spacing issue. */
+.sub{color:var(--muted);font-size:13px;line-height:1.4;}
+.screen-head .sub{margin-top:2px;}
 
 /* ---------- Cards ---------- */
 .card{
@@ -225,8 +240,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 /* List row with a leading icon-badge, used for program/quick-nav grids. */
 .tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;}
 .tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:13px;display:flex;flex-direction:column;gap:9px;}
-.tile-lbl{font-size:12.5px;font-weight:600;color:var(--paper);}
-.tile-sub{font-size:10.5px;color:var(--muted);margin-top:-6px;}
+.tile > div{display:flex;flex-direction:column;gap:2px;}
+.tile-lbl{font-size:12.5px;font-weight:600;line-height:1.3;color:var(--paper);}
+.tile-sub{font-size:10.5px;line-height:1.3;color:var(--muted);}
 
 /* ---------- Gauge (signature element) ---------- */
 .gauge-row{display:flex;gap:10px;}
