@@ -4181,10 +4181,6 @@ function renderActivityLog(root){
       <div class="card-title">${escapeHtml(dateLabel(date))}'s Activity</div>
       ${todays.map(a=>`<div class="list-row"><div class="lr-main"><div class="lr-title">${escapeHtml(a.label)}</div><div class="lr-sub">${a.minutes} min · ${a.calories} kcal</div></div><button class="swipe-del" data-rmact="${a.id}">Remove</button></div>`).join('') || '<div class="empty"><div class="e-title">Nothing logged yet</div><div class="e-sub">Add a walk, run, or any activity above.</div></div>'}
     </div>
-    <div class="card">
-      <div class="card-title">Not Connected</div>
-      <div class="sub">Wear OS, Apple Health, Fitbit, Garmin and Google Fit sync aren't available in this preview — activity here is entered manually. See Settings → Connections.</div>
-    </div>
   `;
   wireBack(()=> nutNav('diary'));
   $('#actSave').addEventListener('click', ()=>{
@@ -4379,13 +4375,6 @@ function openSettingsModal(){
       <button class="btn btn-block" id="pSave">Save Profile</button>
       <div id="bmrResult" style="margin-top:10px;"></div>
       <hr class="hairline">
-      <div class="card-title">Connections <span class="tick">Preview</span></div>
-      <div class="sub" style="margin-bottom:10px;">These require accounts and APIs this preview can't reach, so they're shown off by default.</div>
-      ${Object.entries({appleHealth:'Apple Health', wearOS:'Wear OS', googleFit:'Google Fit', fitbit:'Fitbit', garmin:'Garmin', grocery:'Grocery Delivery'}).map(([k,label])=>`
-        <div class="list-row"><div class="lr-main"><div class="lr-title">${label}</div><div class="lr-sub">${s.connectedApps[k]?'Connected':'Not connected'}</div></div>
-        <button class="btn btn-sm ${s.connectedApps[k]?'btn-ghost':''}" data-conn="${k}">${s.connectedApps[k]?'Disconnect':'Connect'}</button></div>
-      `).join('')}
-      <hr class="hairline">
       <div class="card-title">Data</div>
       <div class="sub" style="margin-bottom:10px;">All data lives in this browser. Export a backup file regularly — clearing browser data erases everything.</div>
       <div class="sub mono" style="margin-bottom:10px;">Last saved: ${s.lastSavedAt? new Date(s.lastSavedAt).toLocaleString() : 'never'}<br>Last exported: ${s.lastExportedAt? new Date(s.lastExportedAt).toLocaleString() : 'never'}</div>
@@ -4450,14 +4439,6 @@ function openSettingsModal(){
       toast('Profile saved');
       rerender();
     });
-    $$('[data-conn]').forEach(b=> b.addEventListener('click', ()=>{
-      const key = b.dataset.conn;
-      if(!s.connectedApps[key]){
-        toast("This preview can't reach "+key+' — no real account connection is made.');
-      } else {
-        s.connectedApps[key]=false; save(); render();
-      }
-    }));
     $('#exportData').addEventListener('click', ()=>{
       DB.settings.lastExportedAt = new Date().toISOString();
       save();
