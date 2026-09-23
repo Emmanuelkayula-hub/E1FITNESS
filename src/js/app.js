@@ -121,6 +121,20 @@ const STORE_KEY = 'e1fitness_db_v1';
 // in its temporal dead zone when load() needs it.
 const RECOVERY_KEY = STORE_KEY + '_corrupted_backup';
 
+// Same reasoning as RECOVERY_KEY above: load() calls validateDB() (added in
+// V25 as a startup safety net) synchronously as part of `let DB = load()`,
+// and validateDBInner() reads this constant. Left at its original spot
+// further down, it was in the TDZ on every single normal boot with a
+// non-empty exercise list -- i.e. every real user, every launch -- which
+// made validateDB() throw, get caught by its own internal try/catch, and
+// return a fail-closed "unexpected internal structure" result. That, in
+// turn, made load() show the "Some saved data looks unusual" toast on
+// every normal launch: a false positive on 100% of real installs, found
+// while testing V27 against a fixture with actual exercises for the first
+// time (every prior test fixture for this path happened to use an empty
+// exercises array, which never reaches the line that needs this).
+const VALID_EXERCISE_TYPES = ['weight_reps','bodyweight','assisted','duration','cardio'];
+
 /* Bumped whenever the DB shape changes in a way migrate() needs to handle.
    Never reset the database to bump this — migrate() must transform old data
    in place so nothing the user saved is ever lost. */
@@ -184,8 +198,6 @@ function migrate(db){
   }
   return db;
 }
-
-const VALID_EXERCISE_TYPES = ['weight_reps','bodyweight','assisted','duration','cardio'];
 
 /* Data-integrity check reused for two purposes: (1) gating backup imports
    (BUG D) so a malformed/corrupt file can never overwrite good data, and
@@ -1652,11 +1664,32 @@ function recentFoodIds(limit=8){
   }
   return ids;
 }
-// Foods logged most often, most-frequent first. Ties broken by most-recent use.
-function frequentFoodIds(limit=8){
+// How many times each food has actually been logged -- the single source of
+// truth for "frequent" used both by the empty-query browse list below and,
+// as of V27, to rank active search results (a plain substring filter had no
+// ordering at all beyond DB.foods' insertion order).
+function foodLogCounts(){
   const counts = new Map();
   DB.foodLogs.forEach(l=>{ if(foodById(l.foodId)) counts.set(l.foodId, (counts.get(l.foodId)||0)+1); });
-  return [...counts.entries()].sort((a,b)=> b[1]-a[1]).slice(0,limit).map(e=>e[0]);
+  return counts;
+}
+// Foods logged most often, most-frequent first. Ties broken by most-recent use.
+function frequentFoodIds(limit=8){
+  return [...foodLogCounts().entries()].sort((a,b)=> b[1]-a[1]).slice(0,limit).map(e=>e[0]);
+}
+// V27: orders a set of already text-matched foods the same way the
+// empty-query browse list already prioritizes them (favorites, then how
+// often you actually log it) instead of leaving search results in
+// DB.foods' arbitrary insertion order. Array.sort is stable, so foods with
+// no log history at all keep their original relative order as the final
+// tiebreak -- this only ever reorders toward foods the user actually uses.
+function rankFoodsForSearch(foods){
+  const counts = foodLogCounts();
+  return [...foods].sort((a,b)=>{
+    const favDiff = (b.favorite?1:0) - (a.favorite?1:0);
+    if(favDiff) return favDiff;
+    return (counts.get(b.id)||0) - (counts.get(a.id)||0);
+  });
 }
 function exById(id){ return DB.exercises.find(e=>e.id===id); }
 function routineById(id){ return DB.routines.find(r=>r.id===id); }
@@ -1772,6 +1805,19 @@ function weekDayStripHTML(selectedDate, isLoggedFn){
     </div>`;
   }).join('')}</div>`;
 }
+/* V27: local-first + no cloud sync means a lost/reset device is total data
+   loss, so a stale-backup nudge is the highest-value safety net available.
+   Never nags a genuinely new install (no data worth losing yet), and only
+   fires once per app boot from INIT, not on every render. */
+function needsBackupNudge(){
+  const meaningful = DB.sessions.length>=3 || DB.measurements.length>=3 || DB.foodLogs.length>=10;
+  if(!meaningful) return false;
+  const last = DB.settings.lastExportedAt;
+  if(!last) return true;
+  const daysSince = (Date.now() - new Date(last).getTime()) / 86400000;
+  return daysSince > 30;
+}
+
 function computeStreak(){
   let streak=0;
   let d = new Date();
@@ -1803,10 +1849,16 @@ function computeBestStreak(){
 }
 /* Working sets (see isWorkingSet — warm-ups excluded) performed per exercise
    category over the last `days` days, for a simple muscle-group balance view. */
-function muscleGroupSetCounts(days){
-  const cutoff = daysAgoISO(days-1);
+/* endDaysAgo shifts the whole `days`-long window into the past (0 = ending
+   today, `days` = the equal-length window immediately before that one) --
+   lets V27's Progress trend compare "this period" vs "the period before
+   it" using the exact same counting logic Stats already relies on for
+   "this week", instead of a second parallel implementation. */
+function muscleGroupSetCounts(days, endDaysAgo=0){
+  const end = daysAgoISO(endDaysAgo);
+  const cutoff = daysAgoISO(endDaysAgo + days - 1);
   const counts = {};
-  DB.sessions.filter(s=> s.date>=cutoff).forEach(s=>{
+  DB.sessions.filter(s=> s.date>=cutoff && s.date<=end).forEach(s=>{
     (s.groups||[]).forEach(g=> g.forEach(entry=>{
       const e = exById(entry.exerciseId);
       const cat = e ? e.category : 'Other';
@@ -2826,6 +2878,27 @@ function previousSetsForExercise(exerciseId, excludeSessionId){
   }
   return [];
 }
+/* V27: minimal, non-destructive auto-progression suggestion. Only ever
+   surfaces something when there's real prior working-set data AND a
+   defined target rep range -- otherwise returns null, never a guess.
+   Only handles the "you beat the top of your range, try more" case;
+   deliberately says nothing when the lifter held or missed, since the
+   existing "Last time" line already shows that and a same-weight
+   suggestion would be a meaningless restatement, not new information. */
+function suggestNextLoad(entry, prevSets){
+  if(entry.exType!=='weight_reps') return null;
+  const targetMax = entry.targetRepsMax ?? entry.targetRepsMin;
+  if(targetMax==null) return null;
+  const workingPrev = (prevSets||[]).filter(st=> st.tag==='Working' && st.weight!=null && st.reps!=null);
+  if(!workingPrev.length) return null;
+  const topWeight = Math.max(...workingPrev.map(st=>st.weight));
+  const topSets = workingPrev.filter(st=>st.weight===topWeight);
+  const allHitTop = topSets.every(st=> st.reps>=targetMax);
+  if(!allHitTop) return null;
+  const incrementDisplay = DB.settings.units==='kg' ? 2.5 : 5;
+  return { weight: topWeight + fromDisplayWeight(incrementDisplay) };
+}
+
 function setDisplayShort(type, set){
   const u = unitLabel();
   if(type==='weight_reps') return (set.weight!=null && set.reps!=null) ? `${fmt1(toDisplayWeight(set.weight))} × ${set.reps}` : null;
@@ -3048,6 +3121,7 @@ function renderActiveSession(root){
       const firstUndoneIdx = exEntry.sets.findIndex(st=>!st.done);
       const isCurrentBlock = firstUndoneIdx!==-1 && !currentAssigned;
       if(isCurrentBlock) currentAssigned = true;
+      const suggestion = isCurrentBlock ? suggestNextLoad(exEntry, prevSets) : null;
       return `<div class="exercise-block ${isCurrentBlock?'current':''}" id="ex-${gi}-${ii}" data-gi="${gi}" data-ii="${ii}">
         <div class="ex-head">
           <div style="min-width:0;">
@@ -3065,6 +3139,7 @@ function renderActiveSession(root){
         </div>
         ${exEntry.notes? `<div class="ex-notes">${escapeHtml(exEntry.notes)}</div>` : ''}
         ${prev ? `<div class="ex-lasttime"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span class="ll-lbl">Last time</span><span class="ll-val">${escapeHtml(prev.line)}</span></div>` : `<div class="ex-lasttime"><span class="ll-lbl">Previous</span><span class="ll-val">No previous workout</span></div>`}
+        ${suggestion ? `<div class="ex-suggest"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span class="ll-lbl">Try</span><span class="ll-val">${fmt1(toDisplayWeight(suggestion.weight))} ${unitLabel()} — you hit the top of your range last time</span></div>` : ''}
         ${setHeaderRow(exEntry.exType)}
         <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii, prevSets[si], isCurrentBlock && si===firstUndoneIdx)).join('')}</div>
         <div class="ex-foot">
@@ -3992,7 +4067,7 @@ function openFoodPicker(date, meal){
         html += `<div class="card-title" style="margin:${(favFoods.length||recentFoods.length||freqFoods.length)?14:2}px 0 4px;">All Foods</div>` + rest.map(foodRowHtml).join('');
         $('#fpList').innerHTML = html;
       } else {
-        const filtered = DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase()));
+        const filtered = rankFoodsForSearch(DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase())));
         $('#fpList').innerHTML = filtered.map(foodRowHtml).join('') || '<div class="empty"><div class="e-title">No matches</div><div class="e-sub">Try "New Food" to add it.</div><button class="btn btn-sm btn-primary" id="fpEmptyNew" style="margin-top:10px;">+ New Food</button></div>';
       }
       $$('[data-food]').forEach(el=> el.addEventListener('click', ()=> openServingsPrompt(foodById(el.dataset.food), date, meal)));
@@ -4303,7 +4378,7 @@ function openFoodSearchOnly(onPick){
   let q='';
   render();
   function render(){
-    const filtered = DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase())).slice(0,30);
+    const filtered = rankFoodsForSearch(DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase()))).slice(0,30);
     const html = `<div class="modal-head"><h3>Add Food</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="fsSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
       <div>${filtered.map(f=>`<div class="list-row" data-pick="${f.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(f.name)}</div><div class="lr-sub">${fmtInt(f.calories)} kcal</div></div></div>`).join('')}</div>`;
@@ -4448,6 +4523,13 @@ renderers.progress = function(){
   const bestStreak = computeBestStreak();
   const weekCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
   const monthCount = DB.sessions.filter(s=> s.date>=daysAgoISO(29)).length;
+  // Muscle-group trend rides the same range chip as the Weight Trend chart
+  // above -- no extra filter control. "All" has no fixed-length window to
+  // compare against a prior period of equal length, so it falls back to a
+  // 30-day snapshot with no delta rather than a meaningless comparison.
+  const trendDays = range.days || 30;
+  const muscleNow = muscleGroupSetCounts(trendDays);
+  const muscleBefore = range.days ? muscleGroupSetCounts(trendDays, trendDays) : null;
 
   root.innerHTML = `
     <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
@@ -4471,6 +4553,22 @@ renderers.progress = function(){
       ${strength.length ? strength.map(s=>`<div class="strength-row"><span class="strength-name">${escapeHtml(s.name)}</span><span class="strength-val mono">${fmt1(toDisplayWeight(s.best1RM))} ${unitLabel()}</span></div>`).join('')
         : `<div class="sub" style="padding:4px 0;">No strength history yet. Finish a weighted workout to see your best lifts here.</div>`}
       <button class="btn btn-ghost btn-block" id="goStatsFromProgress" style="margin-top:10px;">Full Stats & PRs</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Muscle Groups <span class="tick">${range.days? range.key : '30D'}${muscleBefore?' vs prior':''}</span></div>
+      ${muscleNow.length ? (()=>{
+        const priorMap = new Map(muscleBefore||[]);
+        const maxVal = muscleNow[0][1];
+        return muscleNow.map(([cat,n])=>{
+          const delta = muscleBefore ? n-(priorMap.get(cat)||0) : null;
+          return `<div class="mg-row">
+            <div class="mg-cat">${escapeHtml(cat)}</div>
+            <div class="pbar blue" style="flex:1;"><div style="width:${clamp(n/Math.max(1,maxVal)*100,4,100)}%"></div></div>
+            <div class="mg-val mono">${n}${delta!=null && delta!==0 ? ` <span class="mg-delta ${delta>0?'up':'down'}">${delta>0?'+':''}${delta}</span>` : ''}</div>
+          </div>`;
+        }).join('');
+      })() : `<div class="sub" style="padding:4px 0;">No working sets logged in this range yet.</div>`}
     </div>
 
     <div class="card">
@@ -4968,6 +5066,12 @@ if(DB_LOAD_CORRUPTED){
   // rendering error further down.
   if(DB_VALIDATION_WARNING){
     toast('Some saved data looks unusual — consider exporting a backup from Settings > Data.');
+  } else if(needsBackupNudge()){
+    // Local-first with no cloud sync means a lost/reset device is total data
+    // loss -- this is the single highest-value safety nudge available given
+    // that architecture. Mutually exclusive with the validation warning
+    // above so only one toast ever competes for the user's attention.
+    toast('It’s been a while since your last backup.', {action:{label:'Export', onClick: openSettingsModal}});
   }
   updateTopDate();
   setTab('dashboard');
