@@ -111,6 +111,15 @@ function closeAllModals(){ $('#modalRoot').innerHTML=''; }
    Persistence
    ========================================================= */
 const STORE_KEY = 'e1fitness_db_v1';
+// Key a corrupted raw save is preserved under so it's never lost, even
+// though the app can no longer read it. Only written once per corruption
+// event (never overwritten by a later one) so an earlier unrecovered save
+// can't be clobbered by a second failure. Declared up here (not next to
+// handleCorruptedStore below) because load() runs immediately at script
+// load time via `let DB = load()`, before execution ever reaches that
+// function's textual position — a `const` declared there would still be
+// in its temporal dead zone when load() needs it.
+const RECOVERY_KEY = STORE_KEY + '_corrupted_backup';
 
 /* Bumped whenever the DB shape changes in a way migrate() needs to handle.
    Never reset the database to bump this — migrate() must transform old data
@@ -146,6 +155,12 @@ function defaultDB(){
   };
 }
 
+// Set by load() when the stored save couldn't be parsed/read at all (real
+// corruption) vs. parsed fine but validateDB() flagged a structural problem.
+// Checked once by INIT below to show the appropriate warning — never
+// mutated anywhere else.
+let DB_LOAD_CORRUPTED = false;
+let DB_VALIDATION_WARNING = null;
 let DB = load();
 
 /* Transforms a loaded DB in place from whatever schemaVersion it was saved
@@ -395,15 +410,49 @@ function backfillDefaults(parsed){
   return parsed;
 }
 
+/* Called when the saved DB exists but JSON.parse (or the shape-repair step
+   right after it) throws — i.e. the data is there but unreadable, not a
+   fresh install. Preserves the untouched raw string under RECOVERY_KEY
+   BEFORE anything else touches STORE_KEY, flags DB_LOAD_CORRUPTED so INIT
+   shows a warning instead of silently acting like first launch, then hands
+   back a normal fresh DB so the app itself stays usable. */
+function handleCorruptedStore(raw){
+  try{
+    if(!localStorage.getItem(RECOVERY_KEY)){
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify({preservedAt:new Date().toISOString(), raw}));
+    }
+  }catch(e){ console.warn('Could not preserve corrupted save for recovery', e); }
+  DB_LOAD_CORRUPTED = true;
+  const fresh = defaultDB();
+  seedData(fresh);
+  return fresh;
+}
+
 function load(){
   try{
     const raw = localStorage.getItem(STORE_KEY);
     if(raw){
-      const parsed = backfillDefaults(JSON.parse(raw));
+      let parsed;
+      try{
+        parsed = backfillDefaults(JSON.parse(raw));
+      }catch(parseErr){
+        console.warn('load: stored data could not be read — preserving it for recovery', parseErr);
+        return handleCorruptedStore(raw);
+      }
       // Grandfather in any existing save from before onboarding existed — only genuinely
       // fresh installs (no saved data at all) should ever see the onboarding flow.
       if(parsed.settings.onboarded===undefined) parsed.settings.onboarded = true;
       migrate(parsed);
+      // Lightweight safety net (not a hard gate): flag serious structural
+      // problems so INIT can warn the user, but never block or alter a
+      // successful load over them — see validateDB() for what counts.
+      try{
+        const check = validateDB(parsed);
+        if(!check.valid && check.errors.length){
+          console.warn('[E1FITNESS] startup validation found issues in the loaded data:', check.errors);
+          DB_VALIDATION_WARNING = check.errors;
+        }
+      }catch(e){ console.warn('startup validation itself failed, continuing without it', e); }
       return parsed;
     }
   }catch(e){ console.warn('load failed', e); }
@@ -1788,6 +1837,7 @@ renderers.dashboard = function(){
   const weight = weightSummary();
   const active = DB.activeSession;
   const suggested = suggestedRoutine();
+  const weekWorkoutCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
 
   const macroRow = (label,val,goal,color)=>{
     const pct = clamp((val/goal)*100,0,100);
@@ -1864,6 +1914,10 @@ renderers.dashboard = function(){
         ${gaugeBlock(waterPct, water+'/'+goals.water, 'CUPS', 'Water', 'var(--blue)')}
         ${gaugeBlock(volPct, todaySessions.length? fmtInt(toDisplayWeight(vol)): '0', unitLabel().toUpperCase()+'·REPS', todaySessions.length? 'Logged':'No workout', 'var(--green)')}
       </div>
+      <div class="water-quickadd-row">
+        <span class="water-quickadd-lbl">+ Water</span>
+        ${[1,2,3].map(n=>`<button class="btn btn-ghost btn-sm water-add" data-n="${n}">+${n}</button>`).join('')}
+      </div>
     </div>
 
     <div class="card">
@@ -1887,20 +1941,9 @@ renderers.dashboard = function(){
         <div>${sparklineSVG(weight.points, '#5A87F5')}</div>
       </div>
       <button class="btn btn-primary btn-block" id="logWeightBtn" style="margin-top:10px;">Log Today's Weight</button>
-    </div>
-
-    <div class="card">
-      <div class="card-title">This Week</div>
-      <div class="stat-grid">
-        <div class="stat-box"><div class="sv">${fmtInt(toDisplayWeight(weekVolume()))} ${unitLabel()}</div><div class="sl">Volume</div></div>
-        <div class="stat-box"><div class="sv">${DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length}</div><div class="sl">Workouts logged</div></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Quick Add Water</div>
-      <div class="row">
-        ${[1,2,3].map(n=>`<button class="btn btn-ghost water-add" data-n="${n}">+${n} cup${n>1?'s':''}</button>`).join('')}
+      <div class="week-summary-row">
+        <span class="week-summary-lbl">This week</span>
+        <span class="week-summary-val">${fmtInt(toDisplayWeight(weekVolume()))} ${unitLabel()} · ${weekWorkoutCount} workout${weekWorkoutCount===1?'':'s'}</span>
       </div>
     </div>
 
@@ -2053,7 +2096,7 @@ function wkNav(view, extra={}){ wk = {...wk, view, ...extra}; renderCurrent(); r
 
 function backHeader(title, onBack, right=''){
   return `<div class="screen-head" style="display:flex;align-items:center;gap:10px;">
-    <button class="icon-btn" id="backBtn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button class="icon-btn" id="backBtn" aria-label="Back"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
     <h1 style="flex:1;font-size:20px;">${escapeHtml(title)}</h1>
     ${right}
   </div>`;
@@ -2175,7 +2218,7 @@ function renderExLibrary(root){
 
 function openAddExerciseModal(){
   openModal(`
-    <div class="modal-head"><h3>New Exercise</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>New Exercise</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div class="field"><label>Name</label><input class="input" id="neName" placeholder="e.g. Cable Pull-Through"></div>
     <div class="field"><label>Category</label>
       <select class="input" id="neCat">${['Chest','Back','Legs','Shoulders','Arms','Core','Cardio','Full Body'].map(c=>`<option>${c}</option>`).join('')}</select>
@@ -2370,8 +2413,8 @@ function renderRoutinesList(root){
     return `<div class="list-row">
       <div class="lr-main" style="cursor:pointer;" data-open="${r.id}"><div class="lr-title">${escapeHtml(r.name)}</div><div class="lr-sub">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Never performed'} · ${st.timesCompleted}× done</div></div>
       <div style="display:flex;gap:6px;flex:none;">
-        <button class="icon-btn" data-dup="${r.id}" title="Duplicate" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
-        <button class="icon-btn" data-edit="${r.id}" title="Edit" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg></button>
+        <button class="icon-btn" data-dup="${r.id}" title="Duplicate" aria-label="Duplicate routine" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+        <button class="icon-btn" data-edit="${r.id}" title="Edit" aria-label="Edit routine" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg></button>
       </div>
     </div>`;
   }).join('') || '<div class="empty"><div class="e-title">No templates</div><div class="e-sub">Build one to reuse every week.</div><button class="btn btn-sm btn-primary" id="emptyNewRoutine" style="margin-top:10px;">+ Create Template</button></div>'}
@@ -2468,10 +2511,10 @@ function renderRoutineEdit(root){
       <div class="card" style="padding:12px;">
         <div class="card-title">${g.length>1?'Superset':'Exercise'} ${gi+1}
           <div style="display:flex;gap:4px;align-items:center;">
-            <button class="icon-btn" data-movegroup="${gi}:up" title="Move up" ${gi===0?'disabled':''} style="width:26px;height:26px;">
+            <button class="icon-btn" data-movegroup="${gi}:up" title="Move up" aria-label="Move exercise group up" ${gi===0?'disabled':''} style="width:26px;height:26px;">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
             </button>
-            <button class="icon-btn" data-movegroup="${gi}:down" title="Move down" ${gi===draft.groups.length-1?'disabled':''} style="width:26px;height:26px;">
+            <button class="icon-btn" data-movegroup="${gi}:down" title="Move down" aria-label="Move exercise group down" ${gi===draft.groups.length-1?'disabled':''} style="width:26px;height:26px;">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
             </button>
             <button class="swipe-del" data-rmgroup="${gi}">Remove</button>
@@ -2549,7 +2592,7 @@ function openExercisePickerModal(onPick){
   function renderList(){
     const filtered = DB.exercises.filter(e=> e.name.toLowerCase().includes(q.toLowerCase()));
     const html = `
-      <div class="modal-head"><h3>Choose Exercise</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="modal-head"><h3>Choose Exercise</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="pickSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
       <div id="pickList">${filtered.map(e=>`<div class="list-row" data-pick="${e.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e.name)}</div><div class="lr-sub">${escapeHtml(e.category)}</div></div></div>`).join('') || '<div class="empty"><div class="e-title">No matches</div></div>'}</div>
     `;
@@ -2570,7 +2613,7 @@ function openExercisePickerModal(onPick){
    (not a per-type wizard) so editing a routine stays fast. */
 function openRoutineItemEditor(item, exerciseName, onSave){
   openModal(`
-    <div class="modal-head"><h3>${escapeHtml(exerciseName)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>${escapeHtml(exerciseName)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div class="row">
       <div class="field"><label>Sets</label><input class="input" id="riSets" type="number" min="1" step="1" value="${item.targetSets}"></div>
       <div class="field"><label>Rest (sec)</label><input class="input" id="riRest" type="number" min="0" step="5" value="${item.restSec}"></div>
@@ -2623,14 +2666,14 @@ function openReplaceExerciseModal(entry, onReplace){
     });
   if(alternatives.length===0){
     openModal(`
-      <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="empty"><div class="e-title">No suitable alternative found</div><div class="e-sub">No other ${escapeHtml(cur.category)} exercises are in your library yet.</div></div>
     `, {id:'replaceex'});
     $('#mClose').addEventListener('click', ()=> closeModal('replaceex'));
     return;
   }
   openModal(`
-    <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div class="sub" style="margin-bottom:10px;">Same muscle group (${escapeHtml(cur.category)}) · closest equipment match first</div>
     <div>${alternatives.map(e=>`<div class="list-row" data-alt="${e.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e.name)}</div><div class="lr-sub">${escapeHtml(e.equipment)} · ${exTypeLabel(e.type)}</div></div></div>`).join('')}</div>
   `, {id:'replaceex'});
@@ -2852,7 +2895,7 @@ function renderActiveSession(root){
   const effectiveCurrentIdx = currentIdx===-1 ? flat.length-1 : currentIdx;
   root.innerHTML = `
     <div class="screen-head" style="display:flex;align-items:center;gap:10px;">
-      <button class="icon-btn" id="cancelSession"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      <button class="icon-btn" id="cancelSession" aria-label="Discard workout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       <div style="flex:1;"><h1 style="font-size:19px;">${escapeHtml(s.routineName)}</h1><div class="sub mono" id="elapsedText"><span id="elapsedMinPart">${elapsedMin} min elapsed</span>${flat.length>1? ' · Exercise '+(effectiveCurrentIdx+1)+' of '+flat.length : ''}</div></div>
       <button class="btn btn-primary btn-sm" id="finishSession">Finish</button>
     </div>
@@ -2920,13 +2963,13 @@ function renderActiveSession(root){
             <div><span class="ex-tag">${label}</span> <span class="ex-name">${escapeHtml(e?e.name:'?')}</span></div>
             ${targetLine? `<div class="ex-target">${escapeHtml(targetLine)}</div>` : ''}
           </div>
-          <div style="display:flex;gap:6px;flex:none;">
+          <div class="ex-head-actions">
             ${ii===0 ? `
-            <button class="icon-btn" data-moveex="${gi}:up" title="Move up" ${gi===0?'disabled':''} style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
-            <button class="icon-btn" data-moveex="${gi}:down" title="Move down" ${gi===s.groups.length-1?'disabled':''} style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg></button>
+            <button class="icon-btn ex-act-btn" data-moveex="${gi}:up" title="Move up" aria-label="Move exercise up" ${gi===0?'disabled':''}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+            <button class="icon-btn ex-act-btn" data-moveex="${gi}:down" title="Move down" aria-label="Move exercise down" ${gi===s.groups.length-1?'disabled':''}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg></button>
             ` : ''}
-            <button class="icon-btn" data-replaceex="${gi}:${ii}" title="Replace exercise" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
-            <button class="icon-btn" data-rmex="${gi}:${ii}" title="Remove exercise" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+            <button class="icon-btn ex-act-btn" data-replaceex="${gi}:${ii}" title="Replace exercise" aria-label="Replace exercise"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
+            <button class="icon-btn ex-act-btn" data-rmex="${gi}:${ii}" title="Remove exercise" aria-label="Remove exercise"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
           </div>
         </div>
         ${exEntry.notes? `<div class="ex-notes">${escapeHtml(exEntry.notes)}</div>` : ''}
@@ -3071,7 +3114,7 @@ function renderActiveSession(root){
 
 function openRestTimeModal(currentSec, onConfirm){
   openModal(`
-    <div class="modal-head"><h3>Rest Time</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>Rest Time</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div class="field"><label>Seconds</label><input class="input" id="restSecInput" type="number" value="${currentSec}"></div>
     <div class="row">
       <button class="btn btn-ghost" id="restCancel">Cancel</button>
@@ -3094,7 +3137,7 @@ function openConfirmModal(message, onConfirm, opts={}){
   const confirmLabel = opts.confirmLabel || 'Confirm';
   const danger = !!opts.danger;
   openModal(`
-    <div class="modal-head"><h3>${escapeHtml(title)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>${escapeHtml(title)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 18px;">${escapeHtml(message)}</p>
     <div class="row">
       <button class="btn btn-ghost" id="cfCancel">Cancel</button>
@@ -3111,7 +3154,7 @@ function openConfirmModal(message, onConfirm, opts={}){
    never touched. */
 function openImportErrorModal(errors){
   openModal(`
-    <div class="modal-head"><h3>Import Failed</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>Import Failed</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 10px;">This file couldn't be imported. Your current data was <b>not</b> changed.</p>
     <div class="card" style="max-height:220px;overflow-y:auto;">
       ${errors.slice(0,20).map(e=>`<div style="font-size:12.5px;color:var(--muted);padding:5px 0;border-top:1px solid var(--line);">${escapeHtml(e)}</div>`).join('')}
@@ -3121,6 +3164,22 @@ function openImportErrorModal(errors){
   `, {id:'importerr', center:true});
   $('#mClose').addEventListener('click', ()=> closeModal('importerr'));
   $('#ieClose').addEventListener('click', ()=> closeModal('importerr'));
+}
+
+/* Shown once, at startup, only when load() couldn't read the existing save
+   (see handleCorruptedStore). Deliberately has no "close via backdrop tap"
+   affordance beyond the single Continue button — there's nothing else the
+   user can do here, the app is already running on a fresh DB, and the
+   original data is sitting safely under RECOVERY_KEY regardless of what
+   they click. */
+function openDataRecoveryWarningModal(){
+  openModal(`
+    <div class="modal-head"><h3>Couldn't read your saved data</h3></div>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 10px;">E1FITNESS found existing data on this device but couldn't read it — it may have been corrupted while saving.</p>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 18px;"><b>Nothing has been deleted.</b> A copy of the original data has been kept on this device so it isn't lost. You're continuing with a fresh app for now.</p>
+    <button class="btn btn-primary btn-block" id="drwOk">Continue</button>
+  `, {id:'datarecovery', center:true});
+  $('#drwOk').addEventListener('click', ()=> closeModal('datarecovery'));
 }
 
 function setHeaderRow(type){
@@ -3321,7 +3380,7 @@ function openFinishSheet(){
   const mins = Math.max(1, Math.round((Date.now()-s.startedAt)/60000));
   const exCount = s.groups.reduce((n,g)=>n+g.length,0);
   openModal(`
-    <div class="modal-head"><h3>${escapeHtml(s.routineName)} Complete</h3><button class="icon-btn" id="mClose">\u2715</button></div>
+    <div class="modal-head"><h3>${escapeHtml(s.routineName)} Complete</h3><button class="icon-btn" id="mClose" aria-label="Close">\u2715</button></div>
     <div class="stat-grid">
       <div class="stat-box"><div class="sv" style="color:var(--blue);">${mins}</div><div class="sl">Minutes</div></div>
       <div class="stat-box"><div class="sv" style="color:var(--ember);">${fmtInt(toDisplayWeight(sessionVolume(s)))}</div><div class="sl">${unitLabel()}\u00b7reps volume</div></div>
@@ -3380,7 +3439,7 @@ function renderWkHistory(root){
 function renderSessionDetail(root){
   const s = DB.sessions.find(x=>x.id===wk.historyDate);
   if(!s){ wkNav('history'); return; }
-  root.innerHTML = backHeader(s.routineName, ()=> wkNav('history'), `<button class="icon-btn" id="delSess" style="width:34px;height:34px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg></button>`);
+  root.innerHTML = backHeader(s.routineName, ()=> wkNav('history'), `<button class="icon-btn" id="delSess" aria-label="Delete workout" style="width:34px;height:34px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg></button>`);
   root.innerHTML += `
     <div class="sub" style="margin-bottom:10px;">${dateLabel(s.date)} · ${s.durationMin} min</div>
     ${s.groups.map(g=>g.map(exEntry=>{
@@ -3458,12 +3517,15 @@ function renderWkStats(root){
         </div>`).join('') : `<div class="sub" style="padding:4px 0;">No working sets logged this week yet.</div>`}
     </div>
 
+    <button class="btn btn-ghost btn-block" id="goProgressFromStats" style="margin-bottom:12px;">Body weight & measurements → Progress tab</button>
+
     <div class="field"><label>Exercise</label>
       <select class="input" id="statExSelect">${loggedExIds.map(id=>{const e=exById(id); return `<option value="${id}" ${id===wk.statExId?'selected':''}>${e?escapeHtml(e.name):'?'}</option>`;}).join('')}</select>
     </div>
     <div id="statBody"></div>
   `;
   wireBack(()=> wkNav('home'));
+  $('#goProgressFromStats').addEventListener('click', ()=> setTab('progress'));
   $('#statExSelect').addEventListener('change', e=>{ wk.statExId=e.target.value; renderBody(); });
   renderBody();
   function renderBody(){
@@ -3568,9 +3630,9 @@ function renderDiary(root){
     </div>
     ${weekDayStripHTML(date, iso=> dayFoodLogs(iso).length>0)}
     <div class="row" style="align-items:center;margin-bottom:10px;">
-      <button class="icon-btn" id="prevDay">‹</button>
+      <button class="icon-btn" id="prevDay" aria-label="Previous day">‹</button>
       <div style="flex:2;text-align:center;font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;">${dateLabel(date)}</div>
-      <button class="icon-btn" id="nextDay">›</button>
+      <button class="icon-btn" id="nextDay" aria-label="Next day">›</button>
     </div>
     <div class="card">
       <div class="card-title">Calories <span class="tick">Goal ${goals.calories}</span></div>
@@ -3669,7 +3731,7 @@ function openFoodPicker(date, meal){
   render();
   function render(){
     const html = `
-      <div class="modal-head"><h3>Add to ${escapeHtml(meal)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="modal-head"><h3>Add to ${escapeHtml(meal)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="seg" style="margin-bottom:12px;">
         <button data-m="search" class="${mode==='search'?'active':''}">Search</button>
         <button data-m="barcode" class="${mode==='barcode'?'active':''}">Barcode</button>
@@ -3757,7 +3819,7 @@ function openFoodPicker(date, meal){
     function foodRowHtml(f){
       return `<div class="list-row" data-food="${f.id}" style="cursor:pointer;">
         <div class="lr-main"><div class="lr-title" style="display:flex;align-items:center;gap:6px;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>${f.barcode?'<span class="food-badge">Barcode</span>':''}</div><div class="lr-sub">${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal · P${fmtInt(f.protein)} C${fmtInt(f.carbs)} F${fmtInt(f.fat)}</div></div>
-        <button class="fav-star ${f.favorite?'on':''}" data-fav="${f.id}" title="${f.favorite?'Remove favorite':'Add favorite'}">${f.favorite?'★':'☆'}</button>
+        <button class="fav-star ${f.favorite?'on':''}" data-fav="${f.id}" title="${f.favorite?'Remove favorite':'Add favorite'}" aria-label="${f.favorite?'Remove favorite':'Add favorite'}">${f.favorite?'★':'☆'}</button>
       </div>`;
     }
     function renderFpList(){
@@ -3804,7 +3866,7 @@ function openServingsPrompt(f, date, meal, existingLog){
 
   function render(){
     const html = `
-      <div class="modal-head"><h3>${escapeHtml(f.name)}</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="modal-head"><h3>${escapeHtml(f.name)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="sub" style="margin-bottom:10px;">Default serving: ${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal${prevLog? ' · prefilled from your last log' : ''}</div>
       ${hasGramBasis ? `
         <div class="field"><label>Log By</label>
@@ -4085,7 +4147,7 @@ function openFoodSearchOnly(onPick){
   render();
   function render(){
     const filtered = DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase())).slice(0,30);
-    const html = `<div class="modal-head"><h3>Add Food</h3><button class="icon-btn" id="mClose">✕</button></div>
+    const html = `<div class="modal-head"><h3>Add Food</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="fsSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
       <div>${filtered.map(f=>`<div class="list-row" data-pick="${f.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(f.name)}</div><div class="lr-sub">${fmtInt(f.calories)} kcal</div></div></div>`).join('')}</div>`;
     const existing = $('#backdrop-fs');
@@ -4105,9 +4167,9 @@ function renderPlanner(root){
   root.innerHTML = backHeader('Meal Planner', ()=> nutNav('diary'));
   root.innerHTML += `
     <div class="row" style="align-items:center;margin-bottom:8px;">
-      <button class="icon-btn" id="pPrev">‹</button>
+      <button class="icon-btn" id="pPrev" aria-label="Previous month">‹</button>
       <div style="flex:2;text-align:center;font-size:12.5px;color:var(--muted);">Week of ${dateLabel(start)}</div>
-      <button class="icon-btn" id="pNext">›</button>
+      <button class="icon-btn" id="pNext" aria-label="Next month">›</button>
     </div>
     ${days.map(d=>{
       const planned = DB.mealPlan[d]||{};
@@ -4147,14 +4209,14 @@ function renderPlanner(root){
 // needs to know which of today's meal slots to log into, since that context
 // isn't implied on screens like Saved Meals that aren't scoped to one slot.
 function openMealSlotChooser(onPick){
-  const html = `<div class="modal-head"><h3>Log To</h3><button class="icon-btn" id="mClose">✕</button></div>
+  const html = `<div class="modal-head"><h3>Log To</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div>${MEAL_SLOTS.map(s=>`<div class="list-row" data-slot="${s}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${s}</div></div></div>`).join('')}</div>`;
   openModal(html, {id:'msc', center:true});
   $('#mClose').addEventListener('click', ()=> closeModal('msc'));
   $$('[data-slot]').forEach(el=> el.addEventListener('click', ()=>{ closeModal('msc'); onPick(el.dataset.slot); }));
 }
 function openMealChooser(onPick){
-  const html = `<div class="modal-head"><h3>Choose Meal</h3><button class="icon-btn" id="mClose">✕</button></div>
+  const html = `<div class="modal-head"><h3>Choose Meal</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div>${DB.meals.map(m=>`<div class="list-row" data-pick="${m.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(m.name)}</div></div></div>`).join('')}</div>`;
   openModal(html, {id:'mc'});
   $('#mClose').addEventListener('click', ()=> closeModal('mc'));
@@ -4199,17 +4261,38 @@ function renderActivityLog(root){
 /* =========================================================
    PROGRESS MODULE
    ========================================================= */
+// Ephemeral UI state for the Progress screen — not persisted, resets on
+// reload like any other in-memory view state (e.g. which tab is active).
+// Never touches DB.measurements itself.
+const PROGRESS_RANGES = [
+  {key:'7D', days:7}, {key:'30D', days:30}, {key:'3M', days:90},
+  {key:'6M', days:182}, {key:'1Y', days:365}, {key:'All', days:null}
+];
+const PROGRESS_HISTORY_PAGE = 20;
+let progressChartRange = 'All'; // 'All' keeps the pre-V25 all-time chart behavior as the default
+let progressHistoryExpanded = false;
+
 renderers.progress = function(){
   const root = $('#screen-progress');
   const sorted = [...DB.measurements].sort((a,b)=> new Date(a.date)-new Date(b.date));
-  const weightPoints = sorted.filter(m=>m.weight!=null).map(m=>({x:new Date(m.date).getTime(), y:toDisplayWeight(m.weight)}));
-  const latest = sorted[sorted.length-1];
+  const range = PROGRESS_RANGES.find(r=>r.key===progressChartRange) || PROGRESS_RANGES[PROGRESS_RANGES.length-1];
+  const cutoff = range.days!=null ? Date.now() - range.days*86400000 : null;
+  const chartMeasurements = cutoff!=null ? sorted.filter(m=> new Date(m.date).getTime() >= cutoff) : sorted;
+  const weightPoints = chartMeasurements.filter(m=>m.weight!=null).map(m=>({x:new Date(m.date).getTime(), y:toDisplayWeight(m.weight)}));
+  const latest = sorted[sorted.length-1]; // stat boxes always reflect the true latest entry, independent of the chart's range filter
   const weight = weightSummary();
   const goalLine = weight.goalLbs!=null ? {y: toDisplayWeight(weight.goalLbs), label:'Goal '+fmt1(toDisplayWeight(weight.goalLbs))+' '+unitLabel(), color:'#3BD182'} : null;
+
+  const historyAll = [...sorted].reverse();
+  const historyRows = progressHistoryExpanded ? historyAll : historyAll.slice(0, PROGRESS_HISTORY_PAGE);
+
   root.innerHTML = `
     <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
     <div class="card">
       <div class="card-title">Weight Trend</div>
+      <div class="range-row" role="group" aria-label="Chart time range">
+        ${PROGRESS_RANGES.map(r=>`<button class="range-chip ${r.key===progressChartRange?'active':''}" data-range="${r.key}" aria-pressed="${r.key===progressChartRange}">${r.key}</button>`).join('')}
+      </div>
       ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'#5A87F5', points:weightPoints}], {autoRange:true, refLine:goalLine})}
       ${weight.remaining!=null ? `<div class="sub" style="margin-top:8px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction==='lose'?'go (losing)':'go (gaining)'}`}</div>` : ''}
     </div>
@@ -4220,12 +4303,36 @@ renderers.progress = function(){
     <button class="btn btn-primary btn-block" id="addMeasurement" style="margin-bottom:12px;">+ Log Measurements</button>
     <div class="card">
       <div class="card-title">History</div>
-      <table class="dtable"><tr><th>Date</th><th>Wt</th><th>BF%</th><th>Waist</th></tr>
-      ${[...sorted].reverse().slice(0,10).map(m=>`<tr><td>${dateLabel(m.date)}</td><td>${m.weight!=null?fmt1(toDisplayWeight(m.weight)):'-'}</td><td>${m.bodyFat??'-'}</td><td>${m.waist??'-'}</td></tr>`).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--muted);font-family:'Figtree',sans-serif;">No entries yet</td></tr>`}
+      <table class="dtable"><tr><th>Date</th><th>Wt</th><th>BF%</th><th>Waist</th><th></th></tr>
+      ${historyRows.map(m=>{
+        const hasExtra = m.chest!=null || m.hips!=null || m.arm!=null || m.thigh!=null;
+        const label = dateLabel(m.date);
+        const mainRow = `<tr class="ms-row"><td>${escapeHtml(label)}</td><td>${m.weight!=null?fmt1(toDisplayWeight(m.weight)):'-'}</td><td>${m.bodyFat??'-'}</td><td>${m.waist??'-'}</td><td>${hasExtra?`<button class="icon-btn ms-expand" data-msexpand="${m.id}" aria-label="Show more measurements for ${escapeHtml(label)}" aria-expanded="false"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg></button>`:''}</td></tr>`;
+        const detailRow = hasExtra ? `<tr class="ms-detail" id="msdetail-${m.id}" style="display:none;"><td colspan="5"><div class="ms-detail-grid">
+              <div><span class="ms-detail-lbl">Chest</span><span class="ms-detail-val">${m.chest??'-'}</span></div>
+              <div><span class="ms-detail-lbl">Hips</span><span class="ms-detail-val">${m.hips??'-'}</span></div>
+              <div><span class="ms-detail-lbl">Arm</span><span class="ms-detail-val">${m.arm??'-'}</span></div>
+              <div><span class="ms-detail-lbl">Thigh</span><span class="ms-detail-val">${m.thigh??'-'}</span></div>
+          </div></td></tr>` : '';
+        return mainRow + detailRow;
+      }).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--muted);font-family:'Figtree',sans-serif;">No entries yet</td></tr>`}
       </table>
+      ${!progressHistoryExpanded && historyAll.length>PROGRESS_HISTORY_PAGE ? `<button class="btn btn-ghost btn-block" id="msShowAll" style="margin-top:10px;">Show all ${historyAll.length} entries</button>` : ''}
     </div>
   `;
   $('#addMeasurement').addEventListener('click', openMeasurementModal);
+  $$('.range-row [data-range]').forEach(btn=> btn.addEventListener('click', ()=>{
+    progressChartRange = btn.dataset.range; renderers.progress();
+  }));
+  $$('.ms-expand').forEach(btn=> btn.addEventListener('click', ()=>{
+    const row = $('#msdetail-'+btn.dataset.msexpand);
+    if(!row) return;
+    const expanded = row.style.display !== 'none';
+    row.style.display = expanded ? 'none' : '';
+    btn.setAttribute('aria-expanded', String(!expanded));
+  }));
+  const showAllBtn = $('#msShowAll');
+  if(showAllBtn) showAllBtn.addEventListener('click', ()=>{ progressHistoryExpanded = true; renderers.progress(); });
 };
 
 /* FEATURE 2: shared weight-logging helpers. Logging weight from either the quick
@@ -4270,7 +4377,7 @@ function logWeightEntry(displayWeight, date=todayISO()){
 function openQuickWeightModal(){
   const latest = [...DB.measurements].filter(m=>m.weight!=null).sort((a,b)=> new Date(a.date)-new Date(b.date)).pop();
   openModal(`
-    <div class="modal-head"><h3>Log Today's Weight</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>Log Today's Weight</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="qwWeight" type="number" step="0.1" value="${latest? fmt1(toDisplayWeight(latest.weight)) : ''}" autofocus></div>
     <button class="btn btn-primary btn-block" id="qwSave">Save</button>
   `,{id:'qw', center:true});
@@ -4284,7 +4391,7 @@ function openQuickWeightModal(){
 }
 function openMeasurementModal(){
   openModal(`
-    <div class="modal-head"><h3>Log Measurements</h3><button class="icon-btn" id="mClose">✕</button></div>
+    <div class="modal-head"><h3>Log Measurements</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
     <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="msWeight" type="number" step="0.1"></div>
     <div class="row">
       <div class="field"><label>Body Fat %</label><input class="input" id="msBF" type="number" step="0.1"></div>
@@ -4326,7 +4433,7 @@ function openSettingsModal(){
   function render(){
     const s = DB.settings;
     const html = `
-      <div class="modal-head"><h3>Settings</h3><button class="icon-btn" id="mClose">✕</button></div>
+      <div class="modal-head"><h3>Settings</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
       <div class="card-title">Preferences</div>
       <div class="field"><label>Units</label>
         <div class="seg"><button data-u="lbs" class="${s.units==='lbs'?'active':''}">Imperial (lbs)</button><button data-u="kg" class="${s.units==='kg'?'active':''}">Metric (kg)</button></div>
@@ -4609,9 +4716,26 @@ restTimerPadObserver.observe($('#restTimerRoot'), {childList:true});
 /* =========================================================
    INIT
    ========================================================= */
-if(!DB.settings.onboarded){
+if(DB_LOAD_CORRUPTED){
+  // Corruption implies a genuinely fresh in-memory DB, so onboarding's own
+  // "first launch" flow would be a plausible next step too — but showing
+  // both back to back would bury the warning. The warning takes priority;
+  // onboarding is skipped this one time so the message isn't missed.
+  // Shown BEFORE setTab()'s render rather than after, on purpose: #modalRoot
+  // is static markup already in the page, so this can never be skipped by
+  // an unrelated rendering error the way an "after render" call could be.
+  openDataRecoveryWarningModal();
+  updateTopDate();
+  setTab('dashboard');
+} else if(!DB.settings.onboarded){
   renderOnboarding();
 } else {
+  // Same reasoning as above: fire before setTab()'s render, not after, so
+  // this safety-net warning can't be silently skipped by an unrelated
+  // rendering error further down.
+  if(DB_VALIDATION_WARNING){
+    toast('Some saved data looks unusual — consider exporting a backup from Settings > Data.');
+  }
   updateTopDate();
   setTab('dashboard');
 }
