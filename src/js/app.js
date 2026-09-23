@@ -153,7 +153,14 @@ function defaultDB(){
       goals:{ calories:2200, protein:150, carbs:230, fat:70, fiber:30, sodium:2300, water:8 },
       profile:{ heightCm:null, weightLbs:null, age:null, sex:null, activityLevel:1.375, goalWeightLbs:null, goalType:'maintain', intensity:'normal' },
       lastSavedAt:null,   // last time the DB was written to localStorage (every save())
-      lastExportedAt:null // last time the user actually downloaded a backup file
+      lastExportedAt:null, // last time the user actually downloaded a backup file
+      // V28: which program (if any) the user is currently following.
+      // {programId} only -- current week/workout/phase/completion % are all
+      // *derived* from DB.sessions (see programPosition()), never stored
+      // here, so there's nothing that can drift out of sync with reality or
+      // get silently rewritten. null means "not following a program", the
+      // default and fully backward-compatible state for every existing user.
+      activeProgram:null
     },
     exercises:[], // seeded below
     routines:[],
@@ -165,7 +172,13 @@ function defaultDB(){
     activityLogs:[], // {id,date,type,label,calories,minutes}
     meals:[], // saved meals/recipes: {id,name,items:[{foodId,servings}]}
     mealPlan:{}, // "date|slot" -> mealId or foodLogEntry ref (simple: date->slot->mealId)
-    measurements:[] // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
+    measurements:[], // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
+    // V28: optional structured training programs, built entirely on top of
+    // existing routines -- a program never duplicates or owns exercise/set
+    // data, it only references routine ids. Empty by default; a user who
+    // never creates one sees no behavior change anywhere in the app.
+    // {id, name, description, weeks:[{phase:string|null, routineIds:[id,...]}]}
+    programs:[]
   };
 }
 
@@ -242,6 +255,10 @@ function validateDBInner(data, errors, warnings){
   if(data.waterLogs!=null && (typeof data.waterLogs!=='object' || Array.isArray(data.waterLogs))) errors.push('Invalid "waterLogs".');
   if(data.mealPlan!=null && (typeof data.mealPlan!=='object' || Array.isArray(data.mealPlan))) errors.push('Invalid "mealPlan".');
   if(data.activeSession!=null && (typeof data.activeSession!=='object' || Array.isArray(data.activeSession))) errors.push('Invalid "activeSession".');
+  // V28: programs is intentionally NOT in REQUIRED_ARRAYS -- a backup
+  // exported before V28 simply won't have this key at all, and that must
+  // keep importing cleanly (see backfillDefaults). Only checked if present.
+  if(data.programs!=null && !Array.isArray(data.programs)) errors.push('Invalid "programs" list.');
   if(errors.length) return {valid:false, errors, warnings}; // can't safely inspect further without these
 
   const isNum = v => typeof v==='number' && Number.isFinite(v); // rejects NaN and ±Infinity
@@ -297,6 +314,31 @@ function validateDBInner(data, errors, warnings){
       items.forEach(item=> checkRoutineItem(item, `Routine "${r.name||r.id}" group ${gi+1}`));
     });
   });
+
+  // V28: programs only ever reference routines by id -- never own exercise
+  // data -- so validation just needs shape + referential sanity, no deep
+  // per-set checks like sessions/routines above.
+  const programIds = new Set();
+  (data.programs||[]).forEach((p,i)=>{
+    if(!p || typeof p!=='object' || !p.id){ errors.push(`Program #${i} is missing an id.`); return; }
+    if(programIds.has(p.id)) errors.push(`Duplicate program id "${p.id}".`);
+    programIds.add(p.id);
+    if(typeof p.name!=='string' || !p.name) errors.push(`Program #${i} is missing a name.`);
+    const weeks = asList(p.weeks);
+    if(weeks===null){ errors.push(`Program "${p.name||p.id}" has an invalid weeks list.`); return; }
+    weeks.forEach((w,wi)=>{
+      if(!w || typeof w!=='object'){ errors.push(`Program "${p.name||p.id}" week ${wi+1} is malformed.`); return; }
+      if(w.phase!=null && typeof w.phase!=='string') errors.push(`Program "${p.name||p.id}" week ${wi+1} has an invalid phase.`);
+      const routineIdList = asList(w.routineIds);
+      if(routineIdList===null){ errors.push(`Program "${p.name||p.id}" week ${wi+1} has an invalid workout list.`); return; }
+      routineIdList.forEach(rid=>{ if(!routineIds.has(rid)) warnings.push(`Program "${p.name||p.id}" week ${wi+1} references a missing routine.`); });
+    });
+  });
+  if(data.settings && data.settings.activeProgram!=null){
+    const ap = data.settings.activeProgram;
+    if(typeof ap!=='object' || Array.isArray(ap) || typeof ap.programId!=='string') errors.push('Invalid "settings.activeProgram".');
+    else if(!programIds.has(ap.programId)) warnings.push('settings.activeProgram references a missing program.');
+  }
 
   // Shared shape check for one logged set, valid across every exercise type
   // (only the fields relevant to that type are ever populated).
@@ -415,6 +457,7 @@ function backfillDefaults(parsed){
   if(!parsed.settings.connectedApps) parsed.settings.connectedApps = d.settings.connectedApps;
   if(!parsed.settings.goals) parsed.settings.goals = d.settings.goals;
   if(!parsed.settings.profile) parsed.settings.profile = d.settings.profile;
+  if(parsed.settings.activeProgram===undefined) parsed.settings.activeProgram = d.settings.activeProgram;
   // Backfill any individual fields added to goals/profile since the user's last save,
   // so upgrading the app never drops a returning user into missing-data states.
   Object.keys(d.settings.goals).forEach(k=>{ if(parsed.settings.goals[k]===undefined) parsed.settings.goals[k]=d.settings.goals[k]; });
@@ -1693,6 +1736,49 @@ function rankFoodsForSearch(foods){
 }
 function exById(id){ return DB.exercises.find(e=>e.id===id); }
 function routineById(id){ return DB.routines.find(r=>r.id===id); }
+function programById(id){ return DB.programs.find(p=>p.id===id); }
+
+/* =========================================================
+   V28: Programs (Program -> Week -> Workout -> Routine)
+   ========================================================= */
+// Ordered list of every workout slot in a program, across all weeks, in
+// the order they're meant to be done. This single flattening is the basis
+// for both "what's next" and "% complete" -- there's no separate stored
+// index to drift out of sync.
+function flattenProgramWeeks(program){
+  const flat = [];
+  (program.weeks||[]).forEach((w,wi)=>{
+    (w.routineIds||[]).forEach((rid,ri)=>{
+      flat.push({weekIndex:wi, weekNumber:wi+1, phase:w.phase||null, routineId:rid, workoutIndexInWeek:ri});
+    });
+  });
+  return flat;
+}
+// Derives current position entirely from DB.sessions -- never from a
+// separately-stored "current week" -- so a missed workout, an edited
+// program, or a workout logged out of order can never leave stale state
+// behind, and the same completed session can never double-count (it's
+// counted by simply filtering DB.sessions by programId once).
+function programPosition(program){
+  if(!program) return null;
+  const flat = flattenProgramWeeks(program);
+  const totalWorkouts = flat.length;
+  const completedCount = DB.sessions.filter(s=> s.programId===program.id).length;
+  const pct = totalWorkouts>0 ? clamp(Math.round(completedCount/totalWorkouts*100),0,100) : 0;
+  const complete = totalWorkouts>0 && completedCount>=totalWorkouts;
+  const next = !complete ? flat[completedCount] : null;
+  const lastWeek = program.weeks && program.weeks.length ? program.weeks[program.weeks.length-1] : null;
+  return {
+    totalWorkouts, completedCount, pct, complete,
+    next,
+    nextRoutine: next ? routineById(next.routineId) : null,
+    currentWeekNumber: next ? next.weekNumber : (program.weeks||[]).length,
+    currentPhase: next ? next.phase : (lastWeek ? lastWeek.phase||null : null)
+  };
+}
+function newProgramDraft(){
+  return { id:null, name:'', description:'', weeks:[] };
+}
 function mealById(id){ return DB.meals.find(m=>m.id===id); }
 
 function dayFoodLogs(date){ return DB.foodLogs.filter(l=>l.date===date); }
@@ -1960,6 +2046,13 @@ renderers.dashboard = function(){
   const active = DB.activeSession;
   const suggested = suggestedRoutine();
   const weekWorkoutCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
+  // V28: when the user is following a program, its "what's next" takes over
+  // the existing suggested-workout hero slot instead of a separate card --
+  // programPosition() derives everything from real completed sessions, so
+  // this can never show a stale/hand-tracked week number.
+  const activeProgramEntry = DB.settings.activeProgram;
+  const activeProgram = activeProgramEntry ? programById(activeProgramEntry.programId) : null;
+  const programPos = activeProgram ? programPosition(activeProgram) : null;
 
   const macroRow = (label,val,goal,color)=>{
     const pct = clamp((val/goal)*100,0,100);
@@ -1985,6 +2078,36 @@ renderers.dashboard = function(){
       <div class="hero-title">${todaySessions.length>1? todaySessions.length+' Workouts Completed' : escapeHtml(todaySession.routineName)}</div>
       <div class="hero-meta">${totalMin||'—'} min · ${fmtInt(toDisplayWeight(vol))} ${unitLabel()} volume logged</div>
       <button class="btn btn-block" id="viewTodaySession" style="margin-top:13px;">${todaySessions.length>1? 'View Workouts' : 'View Workout'}</button>
+    </div></div>`;
+  } else if(activeProgram && programPos && programPos.complete){
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div class="hero-eyebrow" style="color:var(--green);">Program complete</div>
+      <div class="hero-title">${escapeHtml(activeProgram.name)}</div>
+      <div class="hero-meta">You finished all ${programPos.totalWorkouts} workouts. Add more weeks or start something new.</div>
+      <button class="btn btn-primary btn-block" id="viewCompletedProgram" style="margin-top:13px;">View Program</button>
+    </div></div>`;
+  } else if(activeProgram && programPos && programPos.nextRoutine){
+    const nr = programPos.nextRoutine;
+    const exCount = nr.groups.reduce((n,g)=>n+g.length,0);
+    const estMin = Math.max(20, nr.groups.length*9);
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+        <div style="min-width:0;">
+          <div class="hero-eyebrow">Week ${programPos.currentWeekNumber}${programPos.currentPhase?' · '+escapeHtml(programPos.currentPhase):''}</div>
+          <div class="hero-title">${escapeHtml(nr.name)}</div>
+          <div class="hero-meta">${escapeHtml(activeProgram.name)} · ${exCount} exercise${exCount!==1?'s':''}</div>
+        </div>
+        <div style="text-align:right;flex:none;">
+          <div class="mono" style="font-size:22px;font-weight:600;">${estMin}</div>
+          <div style="font-size:9.5px;color:var(--faint-2);letter-spacing:.08em;text-transform:uppercase;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">est min</div>
+        </div>
+      </div>
+      <div class="pbar blue" style="margin:10px 0 4px;"><div style="width:${programPos.pct}%"></div></div>
+      <div class="hero-meta" style="margin-top:0;">${programPos.completedCount}/${programPos.totalWorkouts} workouts · ${programPos.pct}% complete</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-primary" id="startProgramNext" style="flex:1;">Start Workout</button>
+        <button class="btn" id="heroProgram" style="flex:none;width:52px;">≡</button>
+      </div>
     </div></div>`;
   } else if(suggested){
     const st = templateStats(suggested.id);
@@ -2091,6 +2214,15 @@ renderers.dashboard = function(){
   if(startSuggestedBtn) startSuggestedBtn.addEventListener('click', ()=>{ setTab('workout'); startSession(suggested.id); });
   const heroRoutinesBtn = $('#heroRoutines');
   if(heroRoutinesBtn) heroRoutinesBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('routines'); });
+  const startProgramNextBtn = $('#startProgramNext');
+  if(startProgramNextBtn) startProgramNextBtn.addEventListener('click', ()=>{
+    setTab('workout');
+    startSession(programPos.next.routineId, {programId:activeProgram.id, programName:activeProgram.name, weekNumber:programPos.currentWeekNumber, phase:programPos.currentPhase});
+  });
+  const heroProgramBtn = $('#heroProgram');
+  if(heroProgramBtn) heroProgramBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
+  const viewCompletedProgramBtn = $('#viewCompletedProgram');
+  if(viewCompletedProgramBtn) viewCompletedProgramBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
   const startEmptyHeroBtn = $('#startEmptyHero');
   if(startEmptyHeroBtn) startEmptyHeroBtn.addEventListener('click', ()=>{ setTab('workout'); startSession(null); });
   $$('.water-add').forEach(b=> b.addEventListener('click', ()=>{
@@ -2191,7 +2323,7 @@ function sparklineSVG(points, color, w=140, h=40){
 /* =========================================================
    WORKOUT MODULE
    ========================================================= */
-let wk = { view:'home', routineId:null, exerciseId:null, editingRoutineDraft:null, historyDate:null, statExId:null };
+let wk = { view:'home', routineId:null, exerciseId:null, editingRoutineDraft:null, historyDate:null, statExId:null, editingProgramDraft:null, programId:null };
 
 function exTypeLabel(t){
   return {weight_reps:'Weight × Reps', bodyweight:'Bodyweight', assisted:'Assisted Bodyweight', duration:'Duration', cardio:'Cardio'}[t]||t;
@@ -2206,6 +2338,9 @@ renderers.workout = function(){
     case 'routines': return renderRoutinesList(root);
     case 'routine-edit': return renderRoutineEdit(root);
     case 'template-detail': return renderTemplateDetail(root);
+    case 'programs': return renderProgramsList(root);
+    case 'program-edit': return renderProgramEdit(root);
+    case 'program-detail': return renderProgramDetail(root);
     case 'active-session': return renderActiveSession(root);
     case 'history': return renderWkHistory(root);
     case 'session-detail': return renderSessionDetail(root);
@@ -2287,6 +2422,7 @@ function renderWorkoutHome(root){
       <button class="btn" id="goLibrary">Exercise Library</button>
       <button class="btn" id="goCalc">Calculators</button>
     </div>
+    <button class="btn btn-block" id="goPrograms" style="margin-bottom:12px;">Programs</button>
   `;
   const startSuggestedHomeBtn = $('#startSuggestedHome');
   if(startSuggestedHomeBtn) startSuggestedHomeBtn.addEventListener('click', ()=> startSession(suggested.id));
@@ -2298,6 +2434,7 @@ function renderWorkoutHome(root){
   $('#goStats').addEventListener('click', ()=> wkNav('stats'));
   $('#goHistory').addEventListener('click', ()=> wkNav('history'));
   $('#goCalc').addEventListener('click', ()=> wkNav('calculators'));
+  $('#goPrograms').addEventListener('click', ()=> wkNav('programs'));
   $('#quickStart').addEventListener('click', ()=>{
     startSession(null);
   });
@@ -2731,6 +2868,185 @@ function openExercisePickerModal(onPick){
   }
 }
 
+// Picks an existing routine to slot into a program week -- deliberately the
+// same search-modal pattern as openExercisePickerModal above, so building a
+// program feels like the same app rather than a bolted-on feature.
+function openRoutinePickerModal(onPick){
+  let q='';
+  renderList();
+  function renderList(){
+    const filtered = DB.routines.filter(r=> r.name.toLowerCase().includes(q.toLowerCase()));
+    const html = `
+      <div class="modal-head"><h3>Choose Routine</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="rpSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
+      <div>${filtered.map(r=>`<div class="list-row" data-pickr="${r.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(r.name)}</div><div class="lr-sub">${r.groups.reduce((n,g)=>n+g.length,0)} exercise${r.groups.reduce((n,g)=>n+g.length,0)!==1?'s':''}</div></div></div>`).join('') || '<div class="empty"><div class="e-title">No routines yet</div><div class="e-sub">Create a routine first, then add it to your program.</div></div>'}</div>
+    `;
+    const existing = $('#backdrop-rp');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html,{id:'rp'});
+    $('#mClose').addEventListener('click', ()=> closeModal('rp'));
+    const search = $('#rpSearch');
+    if(search) search.addEventListener('input', e=>{ q=e.target.value; renderList(); const i=$('#rpSearch'); i.focus(); i.selectionStart=i.selectionEnd=i.value.length; });
+    $$('[data-pickr]').forEach(el=> el.addEventListener('click', ()=>{
+      const routine = routineById(el.dataset.pickr);
+      closeModal('rp');
+      onPick(routine);
+    }));
+  }
+}
+
+/* ---------------- Programs list ---------------- */
+function renderProgramsList(root){
+  root.innerHTML = backHeader('Programs', ()=> wkNav('home'), `<button class="btn btn-sm btn-primary" id="newProgram">+ New</button>`);
+  root.innerHTML += `<div class="card">${DB.programs.map(p=>{
+    const pos = programPosition(p);
+    const isActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===p.id;
+    return `<div class="list-row" data-openprog="${p.id}" style="cursor:pointer;">
+      <div class="lr-main"><div class="lr-title">${escapeHtml(p.name)}${isActive?' <span class="chip current-chip">Active</span>':''}</div><div class="lr-sub">${p.weeks.length} week${p.weeks.length!==1?'s':''} · ${pos.totalWorkouts} workout${pos.totalWorkouts!==1?'s':''}${pos.totalWorkouts?` · ${pos.pct}% done`:''}</div></div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+    </div>`;
+  }).join('') || `<div class="empty"><div class="e-title">Follow a structured plan</div><div class="e-sub">Create a program from your existing routines.</div><button class="btn btn-sm btn-primary" id="emptyNewProgram" style="margin-top:10px;">+ Create Program</button></div>`}</div>`;
+  wireBack(()=> wkNav('home'));
+  $('#newProgram').addEventListener('click', ()=>{ wk.editingProgramDraft = newProgramDraft(); wkNav('program-edit'); });
+  const emptyNewProgram = $('#emptyNewProgram');
+  if(emptyNewProgram) emptyNewProgram.addEventListener('click', ()=>{ wk.editingProgramDraft = newProgramDraft(); wkNav('program-edit'); });
+  $$('[data-openprog]').forEach(el=> el.addEventListener('click', ()=> wkNav('program-detail', {programId: el.dataset.openprog})));
+}
+
+/* ---------------- Program detail ---------------- */
+function renderProgramDetail(root){
+  const p = programById(wk.programId);
+  if(!p){ wkNav('programs'); return; }
+  const pos = programPosition(p);
+  const isActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===p.id;
+  root.innerHTML = backHeader(p.name, ()=> wkNav('programs'));
+  root.innerHTML += `
+    ${p.description? `<div class="sub" style="margin-bottom:10px;">${escapeHtml(p.description)}</div>` : ''}
+    <div class="card">
+      <div class="card-title">Progress <span class="tick">${pos.completedCount}/${pos.totalWorkouts} workouts</span></div>
+      <div class="pbar blue" style="margin-bottom:4px;"><div style="width:${pos.pct}%"></div></div>
+      <div class="sub">${pos.complete? 'Program complete!' : (pos.totalWorkouts? `Week ${pos.currentWeekNumber} of ${p.weeks.length}${pos.currentPhase?' · '+escapeHtml(pos.currentPhase):''}` : 'No workouts added to this program yet.')}</div>
+    </div>
+    ${!pos.complete && pos.nextRoutine ? `<button class="btn btn-primary btn-block" id="startProgramWorkout" style="margin-bottom:14px;">Start: ${escapeHtml(pos.nextRoutine.name)}</button>` : ''}
+    <div class="card">
+      <div class="card-title">Weeks</div>
+      ${p.weeks.map((w,wi)=>`<div class="list-row" style="cursor:default;"><div class="lr-main"><div class="lr-title">Week ${wi+1}${w.phase?' · '+escapeHtml(w.phase):''}</div><div class="lr-sub">${(w.routineIds||[]).map(rid=>{ const r=routineById(rid); return r?escapeHtml(r.name):'(deleted routine)'; }).join(', ') || 'No workouts'}</div></div></div>`).join('') || `<div class="sub" style="padding:4px 0;">No weeks yet.</div>`}
+    </div>
+    <div class="row" style="margin-bottom:12px;">
+      <button class="btn" id="editProgram">Edit Program</button>
+      <button class="btn ${isActive?'btn-ghost':'btn-primary'}" id="toggleActiveProgram">${isActive?'Stop Following':'Follow This Program'}</button>
+    </div>
+  `;
+  wireBack(()=> wkNav('programs'));
+  const startBtn = $('#startProgramWorkout');
+  if(startBtn) startBtn.addEventListener('click', ()=>{
+    startSession(pos.next.routineId, {programId:p.id, programName:p.name, weekNumber:pos.currentWeekNumber, phase:pos.currentPhase});
+  });
+  $('#editProgram').addEventListener('click', ()=>{ wk.editingProgramDraft = JSON.parse(JSON.stringify(p)); wkNav('program-edit'); });
+  $('#toggleActiveProgram').addEventListener('click', ()=>{
+    DB.settings.activeProgram = isActive ? null : {programId:p.id};
+    save(); toast(isActive? 'Stopped following '+p.name : 'Now following '+p.name); wkNav('program-detail', {programId:p.id});
+  });
+}
+
+/* ---------------- Program editor ---------------- */
+function renderProgramEdit(root){
+  const draft = wk.editingProgramDraft;
+  root.innerHTML = backHeader(draft.id? 'Edit Program':'New Program', ()=> wkNav(draft.id?'program-detail':'programs', {programId:draft.id}));
+  root.innerHTML += `
+    <div class="field"><label>Program Name</label><input class="input" id="pgName" value="${escapeHtml(draft.name)}" placeholder="e.g. 12 Week Strength"></div>
+    <div class="field"><label>Description <span style="color:var(--faint);">optional</span></label><input class="input" id="pgDesc" value="${escapeHtml(draft.description||'')}" placeholder="What's this program for?"></div>
+    <div class="card-title" style="margin-top:6px;">Weeks <span class="tick">Phase is optional</span></div>
+    <div id="weeksList"></div>
+    <button class="btn btn-block" id="addWeek" style="margin-bottom:14px;">+ Add Week</button>
+    <div class="row">
+      <button class="btn btn-ghost" id="cancelProgram">Cancel</button>
+      <button class="btn btn-primary" id="saveProgram">Save Program</button>
+    </div>
+    ${draft.id? `<button class="btn btn-danger btn-block" id="delProgram" style="margin-top:10px;">Delete Program</button>`:''}
+  `;
+  wireBack(()=> wkNav(draft.id?'program-detail':'programs', {programId:draft.id}));
+  renderWeeksList();
+
+  function renderWeeksList(){
+    const list = $('#weeksList');
+    list.innerHTML = draft.weeks.map((w,wi)=>`
+      <div class="card" style="padding:12px;">
+        <div class="card-title">Week ${wi+1}
+          <div style="display:flex;gap:4px;align-items:center;">
+            <button class="icon-btn" data-moveweek="${wi}:up" title="Move up" aria-label="Move week up" ${wi===0?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button class="icon-btn" data-moveweek="${wi}:down" title="Move down" aria-label="Move week down" ${wi===draft.weeks.length-1?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+            </button>
+            <button class="swipe-del" data-rmweek="${wi}">Remove</button>
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:8px;"><label>Phase <span style="color:var(--faint);">optional</span></label><input class="input" data-phase="${wi}" value="${escapeHtml(w.phase||'')}" placeholder="e.g. Foundation, Build, Deload"></div>
+        ${(w.routineIds||[]).map((rid,ri)=>{
+          const r = routineById(rid);
+          return `<div class="list-row"><div class="lr-main"><div class="lr-title">${r?escapeHtml(r.name):'(deleted routine)'}</div></div><button class="swipe-del" data-rmworkout="${wi}:${ri}">✕</button></div>`;
+        }).join('')}
+        <button class="btn btn-sm btn-ghost" data-addworkout="${wi}" style="margin-top:6px;">+ Add Workout</button>
+      </div>
+    `).join('') || `<div class="sub" style="padding:4px 0 10px;">No weeks yet — add one to start scheduling workouts.</div>`;
+    $$('[data-rmweek]').forEach(b=> b.addEventListener('click', ()=>{ draft.weeks.splice(parseInt(b.dataset.rmweek),1); renderWeeksList(); }));
+    $$('[data-moveweek]').forEach(b=> b.addEventListener('click', ()=>{
+      const [wiRaw, dir] = b.dataset.moveweek.split(':');
+      const wi = parseInt(wiRaw);
+      const target = dir==='up' ? wi-1 : wi+1;
+      if(target<0 || target>=draft.weeks.length) return;
+      const [moved] = draft.weeks.splice(wi,1);
+      draft.weeks.splice(target,0,moved);
+      renderWeeksList();
+    }));
+    $$('[data-phase]').forEach(inp=> inp.addEventListener('input', ()=>{ draft.weeks[parseInt(inp.dataset.phase)].phase = inp.value; }));
+    $$('[data-rmworkout]').forEach(b=> b.addEventListener('click', ()=>{
+      const [wi,ri] = b.dataset.rmworkout.split(':').map(Number);
+      draft.weeks[wi].routineIds.splice(ri,1);
+      renderWeeksList();
+    }));
+    $$('[data-addworkout]').forEach(b=> b.addEventListener('click', ()=>{
+      const wi = parseInt(b.dataset.addworkout);
+      openRoutinePickerModal((routine)=>{
+        if(!routine) return;
+        if(!draft.weeks[wi].routineIds) draft.weeks[wi].routineIds = [];
+        draft.weeks[wi].routineIds.push(routine.id);
+        renderWeeksList();
+      });
+    }));
+  }
+
+  $('#addWeek').addEventListener('click', ()=>{
+    draft.weeks.push({ phase:null, routineIds:[] });
+    renderWeeksList();
+  });
+  $('#cancelProgram').addEventListener('click', ()=> wkNav(draft.id?'program-detail':'programs', {programId:draft.id}));
+  $('#saveProgram').addEventListener('click', ()=>{
+    draft.name = $('#pgName').value.trim() || 'Untitled Program';
+    draft.description = $('#pgDesc').value.trim();
+    draft.weeks.forEach(w=>{ w.phase = (w.phase||'').trim() || null; });
+    if(draft.id){
+      const idx = DB.programs.findIndex(x=>x.id===draft.id);
+      DB.programs[idx] = draft;
+    } else {
+      draft.id = uid();
+      DB.programs.push(draft);
+    }
+    save(); toast('Program saved'); wkNav('program-detail', {programId:draft.id});
+  });
+  const delBtn = $('#delProgram');
+  if(delBtn) delBtn.addEventListener('click', ()=>{
+    DB.programs = DB.programs.filter(x=>x.id!==draft.id);
+    // Following the program you just deleted would point at nothing -- clear
+    // it the same way completing a program leaves settings.activeProgram
+    // alone (harmless dangling id) EXCEPT here the program itself is gone,
+    // so leaving it set would silently break the Dashboard's program card.
+    if(DB.settings.activeProgram && DB.settings.activeProgram.programId===draft.id) DB.settings.activeProgram = null;
+    save(); toast('Program deleted'); wkNav('programs');
+  });
+}
+
 /* Prescription editor for a single routine exercise: sets, rep range, optional
    target weight, rest, optional RPE target and notes. Kept as one flat form
    (not a per-type wizard) so editing a routine stays fast. */
@@ -2878,25 +3194,56 @@ function previousSetsForExercise(exerciseId, excludeSessionId){
   }
   return [];
 }
-/* V27: minimal, non-destructive auto-progression suggestion. Only ever
-   surfaces something when there's real prior working-set data AND a
-   defined target rep range -- otherwise returns null, never a guess.
-   Only handles the "you beat the top of your range, try more" case;
-   deliberately says nothing when the lifter held or missed, since the
-   existing "Last time" line already shows that and a same-weight
-   suggestion would be a meaningless restatement, not new information. */
+/* V28: non-destructive auto-progression suggestion, expanded from V27's
+   "beat the top of your range" case to all three real outcomes a set can
+   have against a target rep range. Only ever surfaces something when
+   there's real prior working-set data AND a defined target rep range --
+   otherwise returns null, never a guess. NEVER writes to the set/entry --
+   purely an informational read, same as before. The three cases:
+     'up'       - hit/beat the top of the range -> suggest more weight
+     'continue' - within range but below the top -> same weight, aim higher
+     'repeat'   - missed the bottom of the range -> same weight, try again
+   Each case explains WHY, per the V28 spec's "user should understand why a
+   recommendation appears" requirement -- this is why the message is built
+   here (where the actual prior numbers are in scope) rather than left for
+   the caller to reconstruct from a bare {weight} object. */
+// Distinct icon + text label per suggestion type so the difference between
+// "increase", "continue toward the top of the range" and "repeat, you
+// missed the target" is never communicated by color alone (accessibility
+// requirement -- the ex-suggest-{type} CSS classes below add color as a
+// secondary reinforcement, not the only signal).
+const SUGGEST_LABELS = { up:'Try', continue:'Continue', repeat:'Repeat' };
+const SUGGEST_ICON_PATHS = {
+  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  continue: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/>',
+  repeat: '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>'
+};
+
 function suggestNextLoad(entry, prevSets){
   if(entry.exType!=='weight_reps') return null;
+  const targetMin = entry.targetRepsMin ?? entry.targetRepsMax;
   const targetMax = entry.targetRepsMax ?? entry.targetRepsMin;
   if(targetMax==null) return null;
   const workingPrev = (prevSets||[]).filter(st=> st.tag==='Working' && st.weight!=null && st.reps!=null);
   if(!workingPrev.length) return null;
   const topWeight = Math.max(...workingPrev.map(st=>st.weight));
   const topSets = workingPrev.filter(st=>st.weight===topWeight);
-  const allHitTop = topSets.every(st=> st.reps>=targetMax);
-  if(!allHitTop) return null;
-  const incrementDisplay = DB.settings.units==='kg' ? 2.5 : 5;
-  return { weight: topWeight + fromDisplayWeight(incrementDisplay) };
+  const bestReps = Math.max(...topSets.map(st=>st.reps));
+  const u = unitLabel();
+  const wDisp = w => fmt1(toDisplayWeight(w));
+
+  if(bestReps>=targetMax){
+    const incrementDisplay = DB.settings.units==='kg' ? 2.5 : 5;
+    const nextWeight = topWeight + fromDisplayWeight(incrementDisplay);
+    return { type:'up', weight:nextWeight,
+      message:`Try ${wDisp(nextWeight)} ${u} — you hit the top of your range (${bestReps} reps) last time.` };
+  }
+  if(bestReps>=targetMin){
+    return { type:'continue', weight:topWeight,
+      message:`You're at ${bestReps} reps — repeat ${wDisp(topWeight)} ${u} and aim for ${targetMax} before increasing weight.` };
+  }
+  return { type:'repeat', weight:topWeight,
+    message:`You got ${bestReps} reps last time, below your ${targetMin}-rep target. Repeat ${wDisp(topWeight)} ${u} and aim for ${targetMin}+.` };
 }
 
 function setDisplayShort(type, set){
@@ -2985,7 +3332,14 @@ function routineItemSummary(item){
   return parts.join(' · ');
 }
 
-function startSession(routineId){
+// programContext (optional): {programId, programName, weekNumber, phase} --
+// stamped onto the session at start time and frozen there, the same way
+// routineName is already frozen so later routine edits never retroactively
+// change a workout already logged. This is the ONLY place program linkage
+// is written; completeSession() already copies the whole activeSession
+// object into DB.sessions verbatim, so no separate history/tracking system
+// is needed for "was this workout part of a program".
+function startSession(routineId, programContext){
   const routine = routineId ? routineById(routineId) : null;
   const groups = (routine? routine.groups : []).map(g=> g.map(item=>{
     const e = exById(item.exerciseId);
@@ -3014,7 +3368,17 @@ function startSession(routineId){
   }));
   DB.activeSession = {
     id:uid(), date:todayISO(), routineId: routine?routine.id:null, routineName: routine?routine.name:'Quick Workout',
-    startedAt:Date.now(), groups, notes:''
+    startedAt:Date.now(), groups, notes:'',
+    // V28: present only when this workout was started from a program's
+    // "next up" slot -- absent (undefined) for every ordinary/standalone
+    // workout, old and new alike, so nothing downstream needs to know
+    // about programs unless it explicitly opts in.
+    ...(programContext ? {
+      programId: programContext.programId,
+      programName: programContext.programName,
+      programWeek: programContext.weekNumber,
+      programPhase: programContext.phase || null
+    } : {})
   };
   save();
   wkNav('active-session');
@@ -3053,6 +3417,7 @@ function renderActiveSession(root){
       <div style="flex:1;"><h1 style="font-size:19px;">${escapeHtml(s.routineName)}</h1><div class="sub mono" id="elapsedText"><span id="elapsedMinPart">${elapsedMin} min elapsed</span>${flat.length>1? ' · Exercise '+(effectiveCurrentIdx+1)+' of '+flat.length : ''}</div></div>
       <button class="btn btn-primary btn-sm" id="finishSession">Finish</button>
     </div>
+    ${s.programId ? `<div class="program-context"><span class="pc-week">Week ${s.programWeek}</span>${s.programPhase?`<span class="pc-dot">·</span><span class="pc-phase">${escapeHtml(s.programPhase)}</span>`:''}<span class="pc-dot">·</span><span class="pc-name">${escapeHtml(s.programName)}</span></div>` : ''}
     ${flat.length>1 ? `<div class="ex-pager">${flat.map((f,i)=>{
       const e = exById(f.entry.exerciseId);
       const allDone = f.entry.sets.length>0 && f.entry.sets.every(st=>st.done);
@@ -3139,7 +3504,7 @@ function renderActiveSession(root){
         </div>
         ${exEntry.notes? `<div class="ex-notes">${escapeHtml(exEntry.notes)}</div>` : ''}
         ${prev ? `<div class="ex-lasttime"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span class="ll-lbl">Last time</span><span class="ll-val">${escapeHtml(prev.line)}</span></div>` : `<div class="ex-lasttime"><span class="ll-lbl">Previous</span><span class="ll-val">No previous workout</span></div>`}
-        ${suggestion ? `<div class="ex-suggest"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span class="ll-lbl">Try</span><span class="ll-val">${fmt1(toDisplayWeight(suggestion.weight))} ${unitLabel()} — you hit the top of your range last time</span></div>` : ''}
+        ${suggestion ? `<div class="ex-suggest ex-suggest-${suggestion.type}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SUGGEST_ICON_PATHS[suggestion.type]}</svg><span class="ll-lbl">${SUGGEST_LABELS[suggestion.type]}</span><span class="ll-val">${escapeHtml(suggestion.message)}</span></div>` : ''}
         ${setHeaderRow(exEntry.exType)}
         <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii, prevSets[si], isCurrentBlock && si===firstUndoneIdx)).join('')}</div>
         <div class="ex-foot">
