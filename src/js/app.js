@@ -2535,8 +2535,10 @@ function openRoutineItemEditor(item, exerciseName, onSave){
     item.restSec = restRaw===''? item.restSec : Math.max(0, parseInt(restRaw)||0);
     item.targetRepsMin = (!isNaN(repMin) && repMin>0) ? repMin : item.targetRepsMin;
     item.targetRepsMax = (!isNaN(repMaxRaw) && repMaxRaw>=item.targetRepsMin) ? repMaxRaw : item.targetRepsMin;
-    item.targetWeight = wRaw===''? null : fromDisplayWeight(parseFloat(wRaw));
-    item.rpeTarget = rpeRaw===''? null : parseFloat(rpeRaw);
+    if(wRaw===''){ item.targetWeight = null; }
+    else { const wVal = parseFloat(wRaw); if(Number.isFinite(wVal) && wVal>=0) item.targetWeight = fromDisplayWeight(wVal); else toast('Target weight ignored — enter a valid number 0 or greater'); }
+    if(rpeRaw===''){ item.rpeTarget = null; }
+    else { const rVal = parseFloat(rpeRaw); if(Number.isFinite(rVal) && rVal>=1 && rVal<=10) item.rpeTarget = rVal; else toast('RPE target ignored — enter a number between 1 and 10'); }
     item.notes = $('#riNotes').value.trim();
     closeModal('routineitem');
     onSave();
@@ -3427,7 +3429,7 @@ function renderCalculators(root){
   wireBack(()=> wkNav('home'));
   $('#wuGo').addEventListener('click', ()=>{
     const w = parseFloat($('#wuWeight').value), r = parseFloat($('#wuReps').value)||5;
-    if(!w){ toast('Enter a working weight'); return; }
+    if(!Number.isFinite(w) || w<=0){ toast('Enter a valid working weight greater than 0'); return; }
     const sets = warmupSets(w,r);
     $('#wuResult').innerHTML = `<table class="dtable"><tr><th>Set</th><th>% of Working</th><th>Weight</th><th>Reps</th></tr>
       ${sets.map((st,i)=>`<tr><td>${i+1}</td><td>${Math.round(st.pct*100)}%</td><td>${st.weight} ${unitLabel()}</td><td>${st.reps}</td></tr>`).join('')}
@@ -3436,7 +3438,7 @@ function renderCalculators(root){
   });
   $('#pcGo').addEventListener('click', ()=>{
     const target = parseFloat($('#pcTarget').value), bar = parseFloat($('#pcBar').value)||(DB.settings.units==='kg'?20:45);
-    if(!target){ toast('Enter a target weight'); return; }
+    if(!Number.isFinite(target) || target<=0){ toast('Enter a valid target weight greater than 0'); return; }
     const plates = DB.settings.units==='kg' ? [25,20,15,10,5,2.5,1.25] : [45,35,25,10,5,2.5];
     const breakdown = plateBreakdown(target, bar, plates);
     if(target<bar){ $('#pcResult').innerHTML = `<div class="empty"><div class="e-title">Target below bar weight</div></div>`; return; }
@@ -3653,10 +3655,10 @@ function openFoodPicker(date, meal){
       $('#cfSave').addEventListener('click', ()=>{
         const name = $('#cfName').value.trim();
         if(!name){ toast('Name it first'); return; }
-        const servingGrams = parseFloat($('#cfServingGrams').value) || 0;
+        const servingGrams = parseNonNegative($('#cfServingGrams').value);
         const f = food(name, $('#cfServing').value.trim()||'1 serving', servingGrams,
-          parseFloat($('#cfCal').value)||0, parseFloat($('#cfP').value)||0, parseFloat($('#cfC').value)||0, parseFloat($('#cfF').value)||0,
-          parseFloat($('#cfFib').value)||0, parseFloat($('#cfSod').value)||0, $('#cfBarcode').value.trim());
+          parseNonNegative($('#cfCal').value), parseNonNegative($('#cfP').value), parseNonNegative($('#cfC').value), parseNonNegative($('#cfF').value),
+          parseNonNegative($('#cfFib').value), parseNonNegative($('#cfSod').value), $('#cfBarcode').value.trim());
         f.custom = true;
         DB.foods.push(f); save();
         toast('Food added to your database');
@@ -4099,8 +4101,8 @@ function renderActivityLog(root){
   wireBack(()=> nutNav('diary'));
   $('#actSave').addEventListener('click', ()=>{
     const label = $('#actLabel').value.trim() || 'Activity';
-    const minutes = parseFloat($('#actMin').value)||0;
-    const calories = parseFloat($('#actCal').value)||0;
+    const minutes = parseNonNegative($('#actMin').value);
+    const calories = parseNonNegative($('#actCal').value);
     DB.activityLogs.push({id:uid(), date, type:'manual', label, minutes, calories});
     save(); toast('Activity logged'); renderCurrent();
   });
@@ -4155,6 +4157,17 @@ function findOrCreateMeasurementForDate(date){
 // finite, strictly-positive number. Used everywhere a weight value can sync
 // into DB.settings.profile.weightLbs, since a bad value there quietly
 // corrupts the BMR/TDEE calculator and the Progress weight trend.
+// Parses a raw numeric-field string to a finite, non-negative number, or
+// `fallback` (default 0) for blank/invalid/negative/Infinity input — for
+// fields like custom-food macros or activity minutes/calories where a
+// value can legitimately be zero but never negative or non-finite.
+function parseNonNegative(raw, fallback=0){
+  if(raw==null) return fallback;
+  const trimmed = String(raw).trim();
+  if(trimmed==='') return fallback;
+  const n = parseFloat(trimmed);
+  return (Number.isFinite(n) && n>=0) ? n : fallback;
+}
 function parsePositiveWeight(raw){
   if(raw==null) return null;
   const trimmed = String(raw).trim();
