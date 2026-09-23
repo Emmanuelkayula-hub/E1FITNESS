@@ -1,0 +1,39 @@
+name: Deploy web app to GitHub Pages
+
+# Publishes src/ (the web layer Capacitor also wraps) to GitHub Pages on
+# every push to this branch, so the hosted URL always reflects the latest
+# commit — no manual zip/unzip/re-upload needed to test on a phone.
+#
+# One-time setup required (can't be done from a workflow file): in the
+# repo's Settings -> Pages, set "Source" to "GitHub Actions". After that,
+# this runs automatically on every push here.
+
+on:
+  push:
+    branches:
+      - claude/e1fitness-redesign-m1nzsz
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: src
+      - id: deployment
+        uses: actions/deploy-pages@v4
