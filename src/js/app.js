@@ -173,7 +173,7 @@ function migrate(db){
     // v1 -> v2: routine exercises gain a real set/rep/weight/rest/RPE prescription
     // (BUG A) instead of implicitly meaning "one set"; rename the misleading
     // lastBackup field (BUG E) since it recorded the last *save*, not a backup/export.
-    (db.routines||[]).forEach(r=> (r.groups||[]).forEach(g=> g.forEach(item=> migrateRoutineItem(item))));
+    (db.routines||[]).forEach(r=> (r.groups||[]).forEach(g=> g.forEach(item=> migrateRoutineItem(item, (db.settings && db.settings.restDefault!=null) ? db.settings.restDefault : 90))));
     if(db.settings){
       if(db.settings.lastSavedAt===undefined) db.settings.lastSavedAt = db.settings.lastBackup ?? null;
       if(db.settings.lastExportedAt===undefined) db.settings.lastExportedAt = null;
@@ -1334,7 +1334,7 @@ function seedData(target){
   // above (they're written with just exerciseId+restSec for brevity) via the
   // same migration path old user routines go through, so there's one source
   // of truth for "what a routine exercise looks like".
-  target.routines.forEach(r=> r.groups.forEach(g=> g.forEach(item=> migrateRoutineItem(item))));
+  target.routines.forEach(r=> r.groups.forEach(g=> g.forEach(item=> migrateRoutineItem(item, target.settings.restDefault))));
   const findFood = n => target.foods.find(f=>f.name===n).id;
   target.meals = [
     {id:uid(), name:'High-Protein Breakfast', items:[
@@ -1416,6 +1416,74 @@ function weightSummary(){
     direction = currentLbs > goalLbs ? 'lose' : (currentLbs < goalLbs ? 'gain' : 'there');
   }
   return { currentLbs, goalLbs, points, remaining, direction };
+}
+
+/* V26 Dashboard/Progress "snapshot" helper: how much bodyweight has changed
+   over a trailing window, using whatever measurements actually exist near
+   the window's edges (never interpolated/fabricated). Returns null when
+   there isn't a real prior data point to compare against — callers must
+   treat null as "not enough history yet", not as "no change". */
+function weightChangeSummary(days=30){
+  const withWeight = DB.measurements.filter(m=>m.weight!=null).sort((a,b)=> new Date(a.date)-new Date(b.date));
+  if(withWeight.length<2) return null;
+  const latest = withWeight[withWeight.length-1];
+  const cutoff = daysAgoISO(days);
+  // Closest entry at/before the cutoff date; if the whole history is newer
+  // than the window, fall back to the earliest entry on record so a user
+  // with e.g. 10 days of data still sees an honest (shorter) comparison.
+  let prior = null;
+  for(let i=withWeight.length-2;i>=0;i--){ if(withWeight[i].date<=cutoff){ prior = withWeight[i]; break; } }
+  if(!prior) prior = withWeight[0];
+  if(prior.id===latest.id) return null;
+  const deltaLbs = latest.weight - prior.weight;
+  return { deltaLbs, fromDate: prior.date, toDate: latest.date, spanDays: Math.round((new Date(latest.date)-new Date(prior.date))/86400000) };
+}
+
+/* Bounded-cost "was a PR set in the most recent workout" check — only looks
+   at the exercises actually performed in the single latest session (not the
+   whole exercise library), reusing computePRs() (the same source Stats
+   uses) rather than duplicating PR math. Returns null when there's no
+   session yet or nothing in it qualifies. */
+function recentPRHighlight(){
+  const sessions = [...DB.sessions].sort((a,b)=> (b.startedAt||0)-(a.startedAt||0) || new Date(b.date)-new Date(a.date));
+  const last = sessions[0];
+  if(!last) return null;
+  const seen = new Set();
+  let best = null;
+  (last.groups||[]).forEach(g=> g.forEach(entry=>{
+    if(entry.exType!=='weight_reps' || seen.has(entry.exerciseId)) return;
+    seen.add(entry.exerciseId);
+    const e = exById(entry.exerciseId);
+    if(!e) return;
+    const prs = computePRs(entry.exerciseId);
+    if(prs.best1RM<=0 || !prs.oneRMPoints.length) return;
+    const lastPoint = prs.oneRMPoints[prs.oneRMPoints.length-1];
+    if(lastPoint.date===last.date && lastPoint.value>=prs.best1RM){
+      if(!best || lastPoint.value>best.value) best = {name:e.name, value:lastPoint.value};
+    }
+  }));
+  return best;
+}
+
+/* V26 Progress "strength" snapshot: current best est. 1RM for the handful
+   of exercises actually trained most often, not the whole exercise
+   library. Bounded cost: one pass over sessions to rank by frequency, then
+   computePRs() (already O(sessions) each, same helper Stats uses) for only
+   the top `limit` exercises -- never every exercise ever logged. */
+function topStrengthHighlights(limit=3){
+  const freq = new Map();
+  DB.sessions.forEach(s=> (s.groups||[]).forEach(g=> g.forEach(entry=>{
+    if(entry.exType!=='weight_reps') return;
+    freq.set(entry.exerciseId, (freq.get(entry.exerciseId)||0)+1);
+  })));
+  const topIds = [...freq.entries()].sort((a,b)=>b[1]-a[1]).slice(0,limit).map(([id])=>id);
+  return topIds.map(id=>{
+    const e = exById(id);
+    if(!e) return null;
+    const prs = computePRs(id);
+    if(prs.best1RM<=0) return null;
+    return {id, name:e.name, best1RM:prs.best1RM};
+  }).filter(Boolean);
 }
 
 function computeBMR(){
@@ -1835,6 +1903,8 @@ renderers.dashboard = function(){
   const vol = todaySessions.reduce((sum,s)=> sum + sessionVolume(s), 0);
   const volPct = clamp((vol/8000)*100,0,100) || (todaySessions.length?100:0);
   const weight = weightSummary();
+  const weightChange = weightChangeSummary(30);
+  const recentPR = recentPRHighlight();
   const active = DB.activeSession;
   const suggested = suggestedRoutine();
   const weekWorkoutCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
@@ -1937,6 +2007,7 @@ renderers.dashboard = function(){
             <div class="stat-box"><div class="sv">${weight.goalLbs!=null? fmt1(toDisplayWeight(weight.goalLbs)) : '—'}</div><div class="sl">Goal (${unitLabel()})</div></div>
           </div>
           ${weight.remaining!=null ? `<div class="sub" style="margin-top:8px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction}`}</div>` : `<div class="sub" style="margin-top:8px;">Set a goal weight in Settings → Profile</div>`}
+          ${weightChange ? `<div class="sub" style="margin-top:2px;">${weightChange.deltaLbs===0?'No change':`${weightChange.deltaLbs>0?'+':'-'}${fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))} ${unitLabel()}`} over the last ${weightChange.spanDays} day${weightChange.spanDays===1?'':'s'}</div>` : ''}
         </div>
         <div>${sparklineSVG(weight.points, '#5A87F5')}</div>
       </div>
@@ -1948,7 +2019,7 @@ renderers.dashboard = function(){
     </div>
 
     <div class="card">
-      <div class="card-title">Recent</div>
+      <div class="card-title">Recent${recentPR ? ` <span class="chip pr">PR · ${escapeHtml(recentPR.name)}</span>` : ''}</div>
       ${recentActivityHtml()}
     </div>
   `;
@@ -2003,7 +2074,7 @@ function lineChartSVG(series, opts={}){
   const w = opts.width||480, h = opts.height||160, pad=28;
   let allPoints = series.flatMap(s=>s.points);
   if(allPoints.length===0){
-    return `<div class="empty"><div class="e-title">No data yet</div><div class="e-sub">Log a few sessions to see progress here.</div></div>`;
+    return `<div class="empty"><div class="e-title">${escapeHtml(opts.emptyTitle||'No data yet')}</div><div class="e-sub">${escapeHtml(opts.emptySub||'Log a few sessions to see progress here.')}</div></div>`;
   }
   const xs = allPoints.map(p=>p.x);
   const ys = allPoints.map(p=>p.y);
@@ -2798,14 +2869,24 @@ function defaultRoutineItem(exerciseId){
 /* Backfills a routine exercise saved before target prescriptions existed.
    Never overwrites a value that's already present — only fills gaps, so
    routines the user already fine-tuned are left exactly as they are. */
-function migrateRoutineItem(item){
+// V26 fix (pre-existing bug found during the V25 audit): this used to read
+// the global `DB` for the default rest time, but both callers run before
+// `DB` exists yet — seedData() while building the very DB that `let DB =
+// load()` is about to become, and migrate() on a legacy v1 save, called
+// from inside that same `load()` call. Either path hit a "Cannot access
+// 'DB' before initialization" crash whenever a routine item actually
+// needed the fallback (seed routines always set restSec explicitly, which
+// is why this only ever surfaced for old v1 saves with populated routines
+// missing restSec). Taking the fallback as a parameter removes the
+// dependency on load order entirely.
+function migrateRoutineItem(item, fallbackRestSec){
   if(item.targetSets==null || item.targetSets<1) item.targetSets = 3;
   if(item.targetRepsMin==null) item.targetRepsMin = 8;
   if(item.targetRepsMax==null) item.targetRepsMax = item.targetRepsMin;
   if(item.targetWeight===undefined) item.targetWeight = null;
   if(item.rpeTarget===undefined) item.rpeTarget = null;
   if(item.notes===undefined) item.notes = '';
-  if(item.restSec==null) item.restSec = DB.settings.restDefault;
+  if(item.restSec==null) item.restSec = fallbackRestSec;
   return item;
 }
 /* Prescription line shown under an exercise during an active session — frozen
@@ -2951,16 +3032,26 @@ function renderActiveSession(root){
 
   function renderExBlocks(){
     const wrap = $('#exBlocks');
+    // V26: highlight exactly one exercise block as "current" -- the first
+    // one (in display order) that still has an unfinished set -- and, within
+    // it, the first unfinished set row. Every other row is either "done"
+    // (set.done, pre-existing) or plain "upcoming" (no special class).
+    // Purely a rendering pass over data that already exists on each set;
+    // nothing here is stored.
+    let currentAssigned = false;
     wrap.innerHTML = s.groups.map((g,gi)=> g.map((exEntry, ii)=>{
       const e = exById(exEntry.exerciseId);
       const label = g.length>1 ? String.fromCharCode(65+gi)+(ii+1) : '';
       const prev = e ? lastSessionLineForExercise(e.id, s.id) : null;
       const prevSets = e ? previousSetsForExercise(e.id, s.id) : [];
       const targetLine = entryTargetLine(exEntry);
-      return `<div class="exercise-block" id="ex-${gi}-${ii}" data-gi="${gi}" data-ii="${ii}">
+      const firstUndoneIdx = exEntry.sets.findIndex(st=>!st.done);
+      const isCurrentBlock = firstUndoneIdx!==-1 && !currentAssigned;
+      if(isCurrentBlock) currentAssigned = true;
+      return `<div class="exercise-block ${isCurrentBlock?'current':''}" id="ex-${gi}-${ii}" data-gi="${gi}" data-ii="${ii}">
         <div class="ex-head">
           <div style="min-width:0;">
-            <div><span class="ex-tag">${label}</span> <span class="ex-name">${escapeHtml(e?e.name:'?')}</span></div>
+            <div><span class="ex-tag">${label}</span> <span class="ex-name">${escapeHtml(e?e.name:'?')}</span> <span class="chip current-chip"${isCurrentBlock?'':' hidden'}>Now</span></div>
             ${targetLine? `<div class="ex-target">${escapeHtml(targetLine)}</div>` : ''}
           </div>
           <div class="ex-head-actions">
@@ -2975,7 +3066,7 @@ function renderActiveSession(root){
         ${exEntry.notes? `<div class="ex-notes">${escapeHtml(exEntry.notes)}</div>` : ''}
         ${prev ? `<div class="ex-lasttime"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span class="ll-lbl">Last time</span><span class="ll-val">${escapeHtml(prev.line)}</span></div>` : `<div class="ex-lasttime"><span class="ll-lbl">Previous</span><span class="ll-val">No previous workout</span></div>`}
         ${setHeaderRow(exEntry.exType)}
-        <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii, prevSets[si])).join('')}</div>
+        <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii, prevSets[si], isCurrentBlock && si===firstUndoneIdx)).join('')}</div>
         <div class="ex-foot">
           <button class="btn btn-sm btn-ghost" data-addset="${gi}:${ii}" style="flex:1;">+ Add Set</button>
           ${exEntry.exType==='weight_reps' ? `<button class="btn btn-sm btn-ghost" data-addwarmup="${gi}:${ii}" style="flex:none;">+ Warm-up</button>` : ''}
@@ -3045,11 +3136,68 @@ function renderActiveSession(root){
     wireSetRowEvents();
   }
 
+  // V26: recomputes which exercise block / set row should carry the
+  // "current" highlight after a done-toggle, WITHOUT calling renderExBlocks()
+  // -- that full rebuild is deliberately avoided on check-toggle (see FIX #1
+  // below) to preserve scroll position/focus on mobile. This only flips a
+  // few classList/hidden values on already-rendered nodes.
+  function advanceCurrentHighlight(){
+    const wrap = $('#exBlocks');
+    if(!wrap) return;
+    const prevBlock = $('.exercise-block.current', wrap);
+    if(prevBlock){ prevBlock.classList.remove('current'); const chip = $('.current-chip', prevBlock); if(chip) chip.hidden = true; }
+    const prevRow = $('.set-row.current', wrap);
+    if(prevRow) prevRow.classList.remove('current');
+    outer: for(let gi=0; gi<s.groups.length; gi++){
+      for(let ii=0; ii<s.groups[gi].length; ii++){
+        const entry = s.groups[gi][ii];
+        const si = entry.sets.findIndex(st=>!st.done);
+        if(si===-1) continue;
+        const block = $('#ex-'+gi+'-'+ii, wrap);
+        if(block){ block.classList.add('current'); const chip = $('.current-chip', block); if(chip) chip.hidden = false; }
+        const row = $(`.set-row[data-gi="${gi}"][data-ii="${ii}"][data-si="${si}"]`, wrap);
+        if(row) row.classList.add('current');
+        break outer;
+      }
+    }
+  }
+
   function wireSetRowEvents(){
     $$('.set-row').forEach(row=>{
       const gi = parseInt(row.dataset.gi), ii = parseInt(row.dataset.ii), si = parseInt(row.dataset.si);
       const entry = s.groups[gi][ii];
       const set = entry.sets[si];
+      // FIX #1: toggling done/tag only updates this single row's DOM — no full list rebuild,
+      // so scroll position, keyboard, and input focus are preserved on mobile.
+      const chk = $('.set-check', row);
+      const toggleDone = ()=>{
+        const turningOn = !set.done;
+        set.done = turningOn;
+        chk.classList.toggle('done', set.done);
+        chk.setAttribute('aria-pressed', String(set.done));
+        chk.setAttribute('aria-label', `Mark set ${si+1} ${set.done?'not done':'done'}`);
+        row.classList.toggle('done', set.done);
+        save();
+        renderSessionStats();
+        advanceCurrentHighlight(); // cheap class-only update, not a full renderExBlocks() -- see FIX #1
+        if(turningOn){
+          if(entry.restSec>0){
+            const exForRest = exById(entry.exerciseId);
+            startRestTimer(entry.restSec, exForRest ? exForRest.name : null);
+          }
+          announcePRIfAny(entry, set);
+        }
+      };
+      if(chk){
+        chk.addEventListener('click', toggleDone);
+        // .set-check is a div with role="button" for the checkmark visual --
+        // native <button> semantics aren't used here to keep the custom
+        // circular/checkmark styling, so Enter/Space activation has to be
+        // wired manually to make it keyboard-operable.
+        chk.addEventListener('keydown', (ev)=>{
+          if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); toggleDone(); }
+        });
+      }
       $$('input', row).forEach(inp=>{
         inp.addEventListener('input', ()=>{
           const field = inp.dataset.field;
@@ -3059,23 +3207,18 @@ function renderActiveSession(root){
           else set[field] = v;
           save();
         });
-      });
-      // FIX #1: toggling done/tag only updates this single row's DOM — no full list rebuild,
-      // so scroll position, keyboard, and input focus are preserved on mobile.
-      const chk = $('.set-check', row);
-      if(chk) chk.addEventListener('click', ()=>{
-        const turningOn = !set.done;
-        set.done = turningOn;
-        chk.classList.toggle('done', set.done);
-        save();
-        renderSessionStats();
-        if(turningOn){
-          if(entry.restSec>0){
-            const exForRest = exById(entry.exerciseId);
-            startRestTimer(entry.restSec, exForRest ? exForRest.name : null);
-          }
-          announcePRIfAny(entry, set);
-        }
+        // Faster set logging: hitting Enter/Return in a set's field (a
+        // hardware keyboard, or a mobile IME whose "done"/"go" action fires
+        // a keydown Enter) marks the set done and dismisses the keyboard,
+        // instead of requiring a separate tap on the checkmark. Only
+        // completes the set forward (never un-marks it), so it can't
+        // accidentally undo a set someone already checked off.
+        inp.addEventListener('keydown', (ev)=>{
+          if(ev.key!=='Enter') return;
+          ev.preventDefault();
+          inp.blur();
+          if(!set.done) toggleDone();
+        });
       });
       const tagBtn = $('.set-tagbtn', row);
       if(tagBtn) tagBtn.addEventListener('click', ()=>{
@@ -3201,7 +3344,7 @@ function setHeaderRow(type){
    pre-filled into the field, so it can't be mistaken for entered data and
    never interferes with typing (see the active-workout "previous
    performance" requirement). */
-function setRowHtml(type, set, si, gi, ii, prevSet){
+function setRowHtml(type, set, si, gi, ii, prevSet, isCurrent){
   const u = unitLabel();
   const ph = (field)=>{
     if(!prevSet) return '';
@@ -3215,29 +3358,29 @@ function setRowHtml(type, set, si, gi, ii, prevSet){
   };
   let fields = '';
   if(type==='weight_reps'){
-    fields = `<input type="number" step="0.5" data-field="weight" placeholder="${ph('weight')||u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
-      <input type="number" step="1" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+    fields = `<input type="number" step="0.5" inputmode="decimal" data-field="weight" placeholder="${ph('weight')||u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
+      <input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='bodyweight'){
-    fields = `<input type="number" step="1" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+    fields = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='assisted'){
-    fields = `<input type="number" step="0.5" data-field="assistWeight" placeholder="${ph('assistWeight')||u}" value="${set.assistWeight!=null?fmt1(toDisplayWeight(set.assistWeight)):''}">
-      <input type="number" step="1" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+    fields = `<input type="number" step="0.5" inputmode="decimal" data-field="assistWeight" placeholder="${ph('assistWeight')||u}" value="${set.assistWeight!=null?fmt1(toDisplayWeight(set.assistWeight)):''}">
+      <input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='duration'){
-    fields = `<input type="number" step="1" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">`;
+    fields = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">`;
   } else if(type==='cardio'){
-    fields = `<input type="number" step="0.1" data-field="distance" placeholder="${ph('distance')||'mi/km'}" value="${set.distance??''}">
-      <input type="number" step="1" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">
-      <input type="number" step="1" data-field="calories" placeholder="${ph('calories')||'kcal'}" value="${set.calories??''}">`;
+    fields = `<input type="number" step="0.1" inputmode="decimal" data-field="distance" placeholder="${ph('distance')||'mi/km'}" value="${set.distance??''}">
+      <input type="number" step="1" inputmode="numeric" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">
+      <input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="calories" placeholder="${ph('calories')||'kcal'}" value="${set.calories??''}">`;
   }
   const rpeField = DB.settings.showRPE
     ? `<input type="number" step="0.5" min="1" max="10" class="rpe-input" data-field="rpe" placeholder="–" value="${set.rpe??''}">`
     : '';
-  return `<div class="set-row" data-gi="${gi}" data-ii="${ii}" data-si="${si}">
+  return `<div class="set-row ${set.done?'done':''} ${isCurrent?'current':''}" data-gi="${gi}" data-ii="${ii}" data-si="${si}">
     <div class="set-idx">${si+1}</div>
     ${fields}
     ${rpeField}
-    <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}">${setTagAbbrev(set.tag)}</button>
-    <div class="set-check ${set.done?'done':''}"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
+    <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}" aria-label="Set ${si+1} tag: ${escapeHtml(set.tag||'Working')}, tap to change">${setTagAbbrev(set.tag)}</button>
+    <div class="set-check ${set.done?'done':''}" role="button" tabindex="0" aria-label="Mark set ${si+1} ${set.done?'not done':'done'}" aria-pressed="${!!set.done}"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
     <button class="set-del" title="Delete this set" aria-label="Delete set ${si+1}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
   </div>`;
 }
@@ -3339,8 +3482,8 @@ function renderRestTimer(){
         <div class="rt-lbl">Resting</div>
         <div class="rt-next">${restTimer.nextLabel? 'Next: '+escapeHtml(restTimer.nextLabel) : 'Get ready for your next set'}</div>
       </div>
-      <button class="rt-plus" id="restPlus30">+30</button>
-      <button class="rt-skip" id="skipRest">Skip</button>
+      <button class="rt-plus" id="restPlus30" aria-label="Add 30 seconds to rest">+30</button>
+      <button class="rt-skip" id="skipRest" aria-label="Skip rest">Skip</button>
     </div>`;
   const skip = $('#skipRest');
   if(skip) skip.addEventListener('click', stopRestTimer);
@@ -3664,6 +3807,9 @@ function renderDiary(root){
       <button class="btn" id="goActivity">Activity</button>
     </div>
     ${dayFoodLogs(date).length===0 && dayFoodLogs(shiftDate(date,-1)).length>0 ? `<button class="btn btn-block" id="repeatYesterday" style="margin-bottom:12px;">Repeat Yesterday's Log</button>` : ''}
+    ${DB.meals.length ? `<div class="quicklog-row" role="group" aria-label="Quick-log a saved meal">
+      ${DB.meals.slice(0,6).map(m=>`<button class="range-chip quicklog-chip" data-quicklogmeal="${m.id}">${escapeHtml(m.name)}</button>`).join('')}
+    </div>` : ''}
     <div id="mealSlots"></div>
   `;
   $('#prevDay').addEventListener('click', ()=>{ nut.date = shiftDate(date,-1); renderCurrent(); });
@@ -3687,6 +3833,15 @@ function renderDiary(root){
     save(); renderCurrent();
   }));
   $$('.day-pill').forEach(p=> p.addEventListener('click', ()=>{ nut.date = p.dataset.day; renderCurrent(); }));
+  $$('[data-quicklogmeal]').forEach(el=> el.addEventListener('click', ()=>{
+    const m = mealById(el.dataset.quicklogmeal);
+    if(!m) return;
+    openMealSlotChooser(slot=>{
+      const logDate = nut.date || todayISO();
+      m.items.forEach(it=> DB.foodLogs.push({id:uid(), date:logDate, meal:slot, foodId:it.foodId, amountType:'serving', amount:it.servings}));
+      save(); toast('Logged '+m.name+' to '+dateLabel(logDate)+"'s "+slot); renderCurrent();
+    });
+  }));
   renderMealSlots();
 
   function renderMealSlots(){
@@ -4089,9 +4244,11 @@ function renderMealsList(root){
     const t = mealTotals(m);
     return `<div class="list-row"><div class="lr-main" data-editmeal="${m.id}" style="cursor:pointer;"><div class="lr-title">${escapeHtml(m.name)}</div><div class="lr-sub">${fmtInt(t.calories)} kcal · ${m.items.length} item${m.items.length!==1?'s':''}</div></div>
       <button class="btn btn-sm" data-quicklog="${m.id}">Log</button></div>`;
-  }).join('') || '<div class="empty"><div class="e-title">No saved meals</div><div class="e-sub">Save combos you eat often for one-tap logging.</div></div>'}</div>`;
+  }).join('') || '<div class="empty"><div class="e-title">No saved meals</div><div class="e-sub">Save combos you eat often for one-tap logging.</div><button class="btn btn-sm btn-primary" id="emptyNewMeal" style="margin-top:10px;">+ New Meal</button></div>'}</div>`;
   wireBack(()=> nutNav('diary'));
   $('#newMeal').addEventListener('click', ()=>{ nutNav('meal-edit', {editingMeal:{id:null,name:'',items:[]}}); });
+  const emptyNewMeal = $('#emptyNewMeal');
+  if(emptyNewMeal) emptyNewMeal.addEventListener('click', ()=>{ nutNav('meal-edit', {editingMeal:{id:null,name:'',items:[]}}); });
   $$('[data-editmeal]').forEach(el=> el.addEventListener('click', ()=>{
     const m = mealById(el.dataset.editmeal);
     nutNav('meal-edit', {editingMeal: JSON.parse(JSON.stringify(m))});
@@ -4285,6 +4442,12 @@ renderers.progress = function(){
 
   const historyAll = [...sorted].reverse();
   const historyRows = progressHistoryExpanded ? historyAll : historyAll.slice(0, PROGRESS_HISTORY_PAGE);
+  const weightChange = weightChangeSummary(range.days || 36500);
+  const strength = topStrengthHighlights(3);
+  const streak = computeStreak();
+  const bestStreak = computeBestStreak();
+  const weekCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
+  const monthCount = DB.sessions.filter(s=> s.date>=daysAgoISO(29)).length;
 
   root.innerHTML = `
     <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
@@ -4293,14 +4456,33 @@ renderers.progress = function(){
       <div class="range-row" role="group" aria-label="Chart time range">
         ${PROGRESS_RANGES.map(r=>`<button class="range-chip ${r.key===progressChartRange?'active':''}" data-range="${r.key}" aria-pressed="${r.key===progressChartRange}">${r.key}</button>`).join('')}
       </div>
-      ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'#5A87F5', points:weightPoints}], {autoRange:true, refLine:goalLine})}
-      ${weight.remaining!=null ? `<div class="sub" style="margin-top:8px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction==='lose'?'go (losing)':'go (gaining)'}`}</div>` : ''}
+      ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'#5A87F5', points:weightPoints}], {autoRange:true, refLine:goalLine, emptyTitle:'No weight history yet', emptySub:'Log your first measurement to start tracking your trend.'})}
+      ${weightChange ? `<div class="sub" style="margin-top:8px;">${weightChange.deltaLbs===0?'No change':`${weightChange.deltaLbs>0?'Up':'Down'} ${fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))} ${unitLabel()}`} over the selected range (${weightChange.spanDays} day${weightChange.spanDays===1?'':'s'})</div>` : ''}
+      ${weight.remaining!=null ? `<div class="sub" style="margin-top:4px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction==='lose'?'go (losing)':'go (gaining)'}`}</div>` : ''}
     </div>
     <div class="stat-grid" style="margin-bottom:12px;">
       <div class="stat-box"><div class="sv">${latest && latest.weight!=null? fmt1(toDisplayWeight(latest.weight)):'—'}</div><div class="sl">Latest Weight (${unitLabel()})</div></div>
       <div class="stat-box"><div class="sv">${latest && latest.bodyFat!=null? latest.bodyFat+'%':'—'}</div><div class="sl">Body Fat</div></div>
     </div>
     <button class="btn btn-primary btn-block" id="addMeasurement" style="margin-bottom:12px;">+ Log Measurements</button>
+
+    <div class="card">
+      <div class="card-title">Strength <span class="tick">Est. 1RM</span></div>
+      ${strength.length ? strength.map(s=>`<div class="strength-row"><span class="strength-name">${escapeHtml(s.name)}</span><span class="strength-val mono">${fmt1(toDisplayWeight(s.best1RM))} ${unitLabel()}</span></div>`).join('')
+        : `<div class="sub" style="padding:4px 0;">No strength history yet. Finish a weighted workout to see your best lifts here.</div>`}
+      <button class="btn btn-ghost btn-block" id="goStatsFromProgress" style="margin-top:10px;">Full Stats & PRs</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Consistency</div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sv">${streak}</div><div class="sl">Current streak</div></div>
+        <div class="stat-box"><div class="sv">${bestStreak}</div><div class="sl">Best streak</div></div>
+        <div class="stat-box"><div class="sv">${weekCount}</div><div class="sl">This week</div></div>
+        <div class="stat-box"><div class="sv">${monthCount}</div><div class="sl">Last 30 days</div></div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-title">History</div>
       <table class="dtable"><tr><th>Date</th><th>Wt</th><th>BF%</th><th>Waist</th><th></th></tr>
@@ -4315,12 +4497,14 @@ renderers.progress = function(){
               <div><span class="ms-detail-lbl">Thigh</span><span class="ms-detail-val">${m.thigh??'-'}</span></div>
           </div></td></tr>` : '';
         return mainRow + detailRow;
-      }).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--muted);font-family:'Figtree',sans-serif;">No entries yet</td></tr>`}
+      }).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--muted);font-family:'Figtree',sans-serif;padding:10px 4px;">No measurements yet — log your first one above to start tracking.</td></tr>`}
       </table>
       ${!progressHistoryExpanded && historyAll.length>PROGRESS_HISTORY_PAGE ? `<button class="btn btn-ghost btn-block" id="msShowAll" style="margin-top:10px;">Show all ${historyAll.length} entries</button>` : ''}
     </div>
   `;
   $('#addMeasurement').addEventListener('click', openMeasurementModal);
+  const goStatsBtn = $('#goStatsFromProgress');
+  if(goStatsBtn) goStatsBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('stats'); });
   $$('.range-row [data-range]').forEach(btn=> btn.addEventListener('click', ()=>{
     progressChartRange = btn.dataset.range; renderers.progress();
   }));
@@ -4428,6 +4612,52 @@ function openMeasurementModal(){
 /* =========================================================
    SETTINGS
    ========================================================= */
+/* V26 Goals & Accountability view -- a read-only summary of goals the user
+   already has (weight goal, nutrition/water goals from Settings) plus
+   real consistency stats. Deliberately reuses existing fields/helpers only
+   (weightSummary, computeDayTotals, DB.settings.goals, computeStreak) --
+   no new schema, no separate goal-tracking system. Editing still happens
+   in Settings; this is just "where do I stand," one tap away. */
+function openGoalsModal(){
+  const s = DB.settings;
+  const totals = computeDayTotals(todayISO());
+  const weight = weightSummary();
+  const streak = computeStreak();
+  const weekCount = DB.sessions.filter(x=> x.date>=thisWeekCutoffISO()).length;
+  const goalRow = (label, cur, target, unit, color)=>{
+    if(target==null || !target) return '';
+    const pct = clamp((cur/target)*100, 0, 100);
+    return `<div class="goal-row">
+      <div class="goal-row-top"><span>${escapeHtml(label)}</span><span class="mono">${fmtInt(cur)} / ${fmtInt(target)}${unit}</span></div>
+      <div class="pbar ${color}"><div style="width:${pct}%"></div></div>
+    </div>`;
+  };
+  openModal(`
+    <div class="modal-head"><h3>Goals</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="card-title">Body</div>
+    ${weight.goalLbs!=null ? `<div class="goal-row">
+        <div class="goal-row-top"><span>Weight</span><span class="mono">${weight.currentLbs!=null?fmt1(toDisplayWeight(weight.currentLbs)):'—'} / ${fmt1(toDisplayWeight(weight.goalLbs))} ${unitLabel()}</span></div>
+        ${weight.remaining!=null? `<div class="sub" style="margin-top:2px;">${weight.direction==='there'?"You're at your goal weight!":`${fmt1(weight.remaining)} ${unitLabel()} to go`}</div>` : ''}
+      </div>`
+      : `<div class="sub" style="padding:4px 0 10px;">No goal weight set yet.</div>`}
+    <hr class="hairline">
+    <div class="card-title">Nutrition <span class="tick">Today</span></div>
+    ${goalRow('Calories', totals.calories, s.goals.calories, ' kcal', 'ember') || `<div class="sub" style="padding:4px 0;">No calorie goal set.</div>`}
+    ${goalRow('Protein', totals.protein, s.goals.protein, 'g', 'blue')}
+    ${goalRow('Water', waterCups(todayISO()), s.goals.water, ' cups', 'blue')}
+    <hr class="hairline">
+    <div class="card-title">Consistency</div>
+    <div class="stat-grid">
+      <div class="stat-box"><div class="sv">${streak}</div><div class="sl">Current streak (days)</div></div>
+      <div class="stat-box"><div class="sv">${weekCount}</div><div class="sl">Workouts this week</div></div>
+    </div>
+    <button class="btn btn-block" id="goalsEditPrefs" style="margin-top:16px;">Edit Goals in Settings</button>
+  `, {id:'goals', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('goals'));
+  const editBtn = $('#goalsEditPrefs');
+  if(editBtn) editBtn.addEventListener('click', ()=>{ closeModal('goals'); openSettingsModal(); });
+}
+
 function openSettingsModal(){
   render();
   function render(){
@@ -4444,6 +4674,7 @@ function openSettingsModal(){
       </div>
       <hr class="hairline">
       <div class="card-title">Profile & Goals <span class="tick">for calorie calc</span></div>
+      <button class="btn btn-ghost btn-block" id="viewGoalsSummary" style="margin-bottom:12px;">View Goals Summary</button>
       <div class="row">
         <div class="field"><label>Height (cm)</label><input class="input" id="pHeight" type="number" value="${s.profile.heightCm??''}"></div>
         <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="pWeight" type="number" value="${s.profile.weightLbs? fmt1(toDisplayWeight(s.profile.weightLbs)) : ''}"></div>
@@ -4496,6 +4727,8 @@ function openSettingsModal(){
     const existing = $('#backdrop-settings');
     if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html, {id:'settings', center:false});
     $('#mClose').addEventListener('click', ()=> closeModal('settings'));
+    const viewGoalsBtn = $('#viewGoalsSummary');
+    if(viewGoalsBtn) viewGoalsBtn.addEventListener('click', openGoalsModal);
     $$('[data-u]').forEach(b=> b.addEventListener('click', ()=>{ DB.settings.units = b.dataset.u; save(); render(); rerender(); }));
     let pendingSex = s.profile.sex;
     $$('[data-sex]').forEach(b=> b.addEventListener('click', ()=>{
