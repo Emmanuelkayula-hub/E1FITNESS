@@ -32,6 +32,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+
+      # Stamps this build with the commit SHA so the phone can tell it's
+      # running stale code (js/version-check.js compares against this) and
+      # cache-busts app.css/app.js/native-bridge.js/version-check.js so a
+      # browser that cached the previous deploy's copies is forced to fetch
+      # the new ones instead of reusing them under the same URL. Runs on
+      # the checked-out copy only — nothing here is ever committed back to
+      # the repo, and it never touches anything under localStorage/the DB.
+      - name: Stamp build version
+        run: |
+          VERSION="${GITHUB_SHA::7}"
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "{\"version\":\"$VERSION\",\"deployedAt\":\"$DEPLOYED_AT\"}" > src/version.json
+          sed -i \
+            -e "s#<title>E1FITNESS</title>#<title>E1FITNESS</title>\n<script>window.E1_BUILD_VERSION=\"$VERSION\";</script>#" \
+            -e "s#css/app.css#css/app.css?v=$VERSION#" \
+            -e "s#js/native-bridge.js#js/native-bridge.js?v=$VERSION#" \
+            -e "s#js/app.js#js/app.js?v=$VERSION#" \
+            -e "s#js/version-check.js#js/version-check.js?v=$VERSION#" \
+            src/index.html
+          echo "Stamped build $VERSION"
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: src

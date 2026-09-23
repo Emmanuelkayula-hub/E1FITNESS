@@ -105,3 +105,45 @@ backup format. On native platforms, Export now hands the file to the native
 Share Sheet (there's no browser download manager inside a bare WebView to
 catch a plain `<a download>` click); on the web it still downloads a file
 exactly as before.
+
+## Deployment (GitHub Pages) & getting updates onto your phone
+
+The web build (`src/`) is deployed to GitHub Pages by
+`.github/workflows/deploy-pages.yml`, which runs automatically on every push
+to `claude/e1fitness-redesign-m1nzsz` (one-time setup: repo Settings → Pages
+→ Source → "GitHub Actions" — already done). There is no separate build
+step to run locally; the workflow deploys `src/` as-is.
+
+**Standard change workflow:**
+1. Changes are made locally under `src/` and tested (syntax check, the
+   Playwright regression pass, a mobile-viewport check) *before* anything is
+   pushed.
+2. You get a summary of what changed and a chance to review it.
+3. Only once you approve does a push go to this branch.
+4. The Actions workflow above picks it up automatically and deploys within
+   about a minute — no manual redeploy step.
+
+**Making sure your phone loads the new version, not a stale cached one:**
+the app has no service worker (deliberately — see below), but plain browser
+HTTP caching can still leave Safari holding onto an old copy of `app.js`.
+Two things handle this:
+- Every deploy is stamped with the commit's short SHA. Each deploy's
+  `index.html` references its JS/CSS with a `?v=<sha>` query string, so a
+  new deploy is always a *new URL* to the browser — it can never be served
+  from a stale cache under the same URL.
+- `src/js/version-check.js` checks a small `version.json` (also stamped by
+  the workflow) shortly after load and whenever the tab regains focus. If
+  it doesn't match the version already running, it shows a toast with a
+  **Refresh** button — tapping it does a normal page reload, which never
+  touches `localStorage`, so your workouts/food logs/weight/settings are
+  untouched.
+
+**Why no service worker / full PWA setup:** the app didn't have one, and
+adding one is exactly the kind of thing that *causes* "stuck on an old
+version" bugs if the activation/update lifecycle isn't handled carefully.
+The `?v=<sha>` + `version.json` approach above gets the same practical
+result (reliably fresh code, no stale-cache trap) with far less to get
+wrong. If true offline support (works with zero network at all, not just
+"works because the browser already has it cached") becomes a priority,
+that's a good candidate for a dedicated follow-up pass — see the migration
+report's "next milestone" note.
