@@ -1491,7 +1491,7 @@ function weightChangeSummary(days=30){
   if(!prior) prior = withWeight[0];
   if(prior.id===latest.id) return null;
   const deltaLbs = latest.weight - prior.weight;
-  return { deltaLbs, fromDate: prior.date, toDate: latest.date, spanDays: Math.round((new Date(latest.date)-new Date(prior.date))/86400000) };
+  return { deltaLbs, fromDate: prior.date, toDate: latest.date, spanDays: Math.round((new Date(latest.date)-new Date(prior.date))/86400000), baseWeightLbs: prior.weight };
 }
 
 /* Bounded-cost "was a PR set in the most recent workout" check — only looks
@@ -2082,28 +2082,29 @@ renderers.dashboard = function(){
   } else if(activeProgram && programPos && programPos.complete){
     heroHtml = `<div class="hero-card"><div class="hero-card-in">
       <div class="hero-eyebrow" style="color:var(--green);">Program complete</div>
-      <div class="hero-title">${escapeHtml(activeProgram.name)}</div>
-      <div class="hero-meta">You finished all ${programPos.totalWorkouts} workouts. Add more weeks or start something new.</div>
+      <div class="hero-title">Nice work!</div>
+      <div class="hero-meta">You finished all ${programPos.totalWorkouts} workouts in ${escapeHtml(activeProgram.name)}. Add more weeks or start something new.</div>
       <button class="btn btn-primary btn-block" id="viewCompletedProgram" style="margin-top:13px;">View Program</button>
     </div></div>`;
   } else if(activeProgram && programPos && programPos.nextRoutine){
+    // V29: name/week/phase/progress now live in the Current Program card
+    // above -- this card's only job is "next workout" as a distinct,
+    // focused action, matching the reference design's two-card split.
     const nr = programPos.nextRoutine;
     const exCount = nr.groups.reduce((n,g)=>n+g.length,0);
     const estMin = Math.max(20, nr.groups.length*9);
     heroHtml = `<div class="hero-card"><div class="hero-card-in">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
         <div style="min-width:0;">
-          <div class="hero-eyebrow">Week ${programPos.currentWeekNumber}${programPos.currentPhase?' · '+escapeHtml(programPos.currentPhase):''}</div>
+          <div class="hero-eyebrow">Next Workout</div>
           <div class="hero-title">${escapeHtml(nr.name)}</div>
-          <div class="hero-meta">${escapeHtml(activeProgram.name)} · ${exCount} exercise${exCount!==1?'s':''}</div>
+          <div class="hero-meta">Today · ${exCount} exercise${exCount!==1?'s':''}</div>
         </div>
         <div style="text-align:right;flex:none;">
           <div class="mono" style="font-size:22px;font-weight:600;">${estMin}</div>
           <div style="font-size:9.5px;color:var(--faint-2);letter-spacing:.08em;text-transform:uppercase;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">est min</div>
         </div>
       </div>
-      <div class="pbar blue" style="margin:10px 0 4px;"><div style="width:${programPos.pct}%"></div></div>
-      <div class="hero-meta" style="margin-top:0;">${programPos.completedCount}/${programPos.totalWorkouts} workouts · ${programPos.pct}% complete</div>
       <div class="row" style="margin-top:10px;">
         <button class="btn btn-primary" id="startProgramNext" style="flex:1;">Start Workout</button>
         <button class="btn" id="heroProgram" style="flex:none;width:52px;">≡</button>
@@ -2140,6 +2141,38 @@ renderers.dashboard = function(){
     </div></div>`;
   }
 
+  // V29: a compact, tappable "Current Program" summary card -- separate
+  // from the hero below so "which program am I following" and "what's my
+  // very next action" read as two distinct pieces of information instead
+  // of being blended into one card. Purely visual: activeProgram/programPos
+  // are the same values the hero branches below already compute.
+  const currentProgramCardHtml = (activeProgram && programPos) ? `
+    <div class="card" id="currentProgramCard" style="cursor:pointer;display:flex;align-items:center;gap:12px;">
+      <div class="icon-badge" style="background:rgba(59,209,130,0.14);color:var(--green);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9-6.3 3.9 1.7-7-5.4-4.7 7.1-.6z"/></svg>
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;"><span class="card-title" style="margin:0;">Current Program</span><span class="badge-active">Active</span></div>
+        <div style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:16px;text-transform:uppercase;letter-spacing:.01em;margin-top:2px;">${escapeHtml(activeProgram.name)}</div>
+        <div class="sub" style="margin-top:1px;">${programPos.complete? 'Complete' : `Week ${programPos.currentWeekNumber} of ${activeProgram.weeks.length}`}${programPos.currentPhase?' · '+escapeHtml(programPos.currentPhase):''}</div>
+        <div class="pbar green" style="margin-top:8px;"><div style="width:${programPos.pct}%"></div></div>
+      </div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" style="flex:none;"><path d="M9 18l6-6-6-6"/></svg>
+    </div>
+  ` : '';
+
+  const QUICK_NAV_TILES = [
+    {label:'Workouts', sub:DB.routines.length+' routines', color:'#B073F0', bg:'rgba(176,115,240,0.14)', tab:'workout', icon:'<path d="M6.5 6.5l11 11"/><path d="M4 9l3-3 2.5 2.5-3 3zM20 15l-3 3-2.5-2.5 3-3z"/>'},
+    {label:'Nutrition', sub:'Track food', color:'var(--green)', bg:'rgba(59,209,130,0.14)', tab:'nutrition', icon:'<path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 2v3M10 2v3M14 2v3"/>'},
+    {label:'Progress', sub:'See your trends', color:'var(--ember)', bg:'rgba(245,154,75,0.14)', tab:'progress', icon:'<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>'},
+    {label:'Programs', sub:'Manage plans', color:'#F06AA6', bg:'rgba(240,106,166,0.14)', tab:'workout', wk:'programs', icon:'<path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9-6.3 3.9 1.7-7-5.4-4.7 7.1-.6z"/>'}
+  ];
+  const quickNavHtml = `<div class="tile-grid">${QUICK_NAV_TILES.map((t,i)=>`
+    <button class="tile" data-qnav="${i}">
+      <div class="icon-badge icon-badge-sm" style="background:${t.bg};color:${t.color};"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${t.icon}</svg></div>
+      <div><div class="tile-lbl">${escapeHtml(t.label)}</div><div class="tile-sub">${escapeHtml(t.sub)}</div></div>
+    </button>`).join('')}</div>`;
+
   $('#screen-dashboard').innerHTML = `
     <div class="screen-head">
       <h1>Today</h1>
@@ -2148,7 +2181,11 @@ renderers.dashboard = function(){
 
     ${weekDayStripHTML(date)}
 
+    ${currentProgramCardHtml}
+
     ${heroHtml}
+
+    ${quickNavHtml}
 
     <button class="btn btn-ember btn-block" id="qsFood" style="margin-bottom:12px;">Log Food</button>
 
@@ -2225,6 +2262,13 @@ renderers.dashboard = function(){
   if(viewCompletedProgramBtn) viewCompletedProgramBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
   const startEmptyHeroBtn = $('#startEmptyHero');
   if(startEmptyHeroBtn) startEmptyHeroBtn.addEventListener('click', ()=>{ setTab('workout'); startSession(null); });
+  const currentProgramCard = $('#currentProgramCard');
+  if(currentProgramCard) currentProgramCard.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
+  $$('[data-qnav]').forEach(b=> b.addEventListener('click', ()=>{
+    const t = QUICK_NAV_TILES[parseInt(b.dataset.qnav)];
+    setTab(t.tab);
+    if(t.wk) wkNav(t.wk);
+  }));
   $$('.water-add').forEach(b=> b.addEventListener('click', ()=>{
     const n = parseInt(b.dataset.n);
     DB.waterLogs[date] = (DB.waterLogs[date]||0) + n;
@@ -2332,6 +2376,7 @@ function exTypeLabel(t){
 renderers.workout = function(){
   const root = $('#screen-workout');
   if(DB.activeSession && wk.view!=='active-session'){ wk.view='active-session'; }
+  root.classList.toggle('workout-dark', wk.view==='active-session');
   switch(wk.view){
     case 'library': return renderExLibrary(root);
     case 'exercise-detail': return renderExDetail(root);
@@ -2897,14 +2942,24 @@ function openRoutinePickerModal(onPick){
 /* ---------------- Programs list ---------------- */
 function renderProgramsList(root){
   root.innerHTML = backHeader('Programs', ()=> wkNav('home'), `<button class="btn btn-sm btn-primary" id="newProgram">+ New</button>`);
-  root.innerHTML += `<div class="card">${DB.programs.map(p=>{
+  const activeFirst = [...DB.programs].sort((a,b)=>{
+    const aActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===a.id;
+    const bActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===b.id;
+    return (bActive?1:0)-(aActive?1:0);
+  });
+  root.innerHTML += activeFirst.length ? activeFirst.map(p=>{
     const pos = programPosition(p);
     const isActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===p.id;
-    return `<div class="list-row" data-openprog="${p.id}" style="cursor:pointer;">
-      <div class="lr-main"><div class="lr-title">${escapeHtml(p.name)}${isActive?' <span class="chip current-chip">Active</span>':''}</div><div class="lr-sub">${p.weeks.length} week${p.weeks.length!==1?'s':''} · ${pos.totalWorkouts} workout${pos.totalWorkouts!==1?'s':''}${pos.totalWorkouts?` · ${pos.pct}% done`:''}</div></div>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+    return `<div class="card" data-openprog="${p.id}" style="cursor:pointer;display:flex;align-items:center;gap:12px;">
+      <div class="icon-badge" style="background:rgba(59,209,130,0.14);color:var(--green);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9-6.3 3.9 1.7-7-5.4-4.7 7.1-.6z"/></svg></div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:15px;text-transform:uppercase;">${escapeHtml(p.name)}</span>${isActive?'<span class="badge-active">Active</span>':''}</div>
+        <div class="sub" style="margin-top:2px;">${p.weeks.length} week${p.weeks.length!==1?'s':''} · ${pos.totalWorkouts} workout${pos.totalWorkouts!==1?'s':''}${pos.totalWorkouts?` · ${pos.pct}% done`:''}</div>
+        ${pos.totalWorkouts ? `<div class="pbar green" style="margin-top:8px;"><div style="width:${pos.pct}%"></div></div>` : ''}
+      </div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" style="flex:none;"><path d="M9 18l6-6-6-6"/></svg>
     </div>`;
-  }).join('') || `<div class="empty"><div class="e-title">Follow a structured plan</div><div class="e-sub">Create a program from your existing routines.</div><button class="btn btn-sm btn-primary" id="emptyNewProgram" style="margin-top:10px;">+ Create Program</button></div>`}</div>`;
+  }).join('') : `<div class="empty"><div class="icon-badge" style="width:52px;height:52px;border-radius:16px;background:var(--blue-dim);color:var(--blue-tint);margin:0 auto 14px;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h13l-3 4 3 4H5"/></svg></div><div class="e-title">No Program Yet</div><div class="e-sub">Create a structured training plan using your existing routines.</div><button class="btn btn-sm btn-primary" id="emptyNewProgram" style="margin-top:12px;">+ Create Program</button></div>`;
   wireBack(()=> wkNav('home'));
   $('#newProgram').addEventListener('click', ()=>{ wk.editingProgramDraft = newProgramDraft(); wkNav('program-edit'); });
   const emptyNewProgram = $('#emptyNewProgram');
@@ -2913,6 +2968,9 @@ function renderProgramsList(root){
 }
 
 /* ---------------- Program detail ---------------- */
+function programOverviewRow(label, value){
+  return `<div><span class="ms-detail-lbl">${escapeHtml(label)}</span><span class="ms-detail-val" style="text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">${escapeHtml(value)}</span></div>`;
+}
 function renderProgramDetail(root){
   const p = programById(wk.programId);
   if(!p){ wkNav('programs'); return; }
@@ -2923,13 +2981,43 @@ function renderProgramDetail(root){
     ${p.description? `<div class="sub" style="margin-bottom:10px;">${escapeHtml(p.description)}</div>` : ''}
     <div class="card">
       <div class="card-title">Progress <span class="tick">${pos.completedCount}/${pos.totalWorkouts} workouts</span></div>
-      <div class="pbar blue" style="margin-bottom:4px;"><div style="width:${pos.pct}%"></div></div>
+      <div class="pbar green" style="margin-bottom:4px;"><div style="width:${pos.pct}%"></div></div>
       <div class="sub">${pos.complete? 'Program complete!' : (pos.totalWorkouts? `Week ${pos.currentWeekNumber} of ${p.weeks.length}${pos.currentPhase?' · '+escapeHtml(pos.currentPhase):''}` : 'No workouts added to this program yet.')}</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Program Overview</div>
+      <div class="ms-detail-grid" style="padding:0;">
+        ${programOverviewRow('Phase', pos.currentPhase || '—')}
+        ${programOverviewRow('Weeks', String(p.weeks.length))}
+        ${programOverviewRow('Current Week', pos.complete ? 'Complete' : String(pos.currentWeekNumber||1))}
+        ${programOverviewRow('Next Workout', pos.complete ? '—' : (pos.nextRoutine ? pos.nextRoutine.name : '—'))}
+      </div>
     </div>
     ${!pos.complete && pos.nextRoutine ? `<button class="btn btn-primary btn-block" id="startProgramWorkout" style="margin-bottom:14px;">Start: ${escapeHtml(pos.nextRoutine.name)}</button>` : ''}
     <div class="card">
-      <div class="card-title">Weeks</div>
-      ${p.weeks.map((w,wi)=>`<div class="list-row" style="cursor:default;"><div class="lr-main"><div class="lr-title">Week ${wi+1}${w.phase?' · '+escapeHtml(w.phase):''}</div><div class="lr-sub">${(w.routineIds||[]).map(rid=>{ const r=routineById(rid); return r?escapeHtml(r.name):'(deleted routine)'; }).join(', ') || 'No workouts'}</div></div></div>`).join('') || `<div class="sub" style="padding:4px 0;">No weeks yet.</div>`}
+      <div class="card-title">Weekly Schedule</div>
+      ${(()=>{
+        // V29: give each week the same done/current/upcoming distinction
+        // Active Workout already uses for sets -- derived from the same
+        // flat completed-count math programPosition() already computes,
+        // never a second source of truth.
+        let flatIdx = 0;
+        return p.weeks.map((w,wi)=>{
+          const slotCount = (w.routineIds||[]).length;
+          const weekStart = flatIdx, weekEnd = flatIdx + slotCount;
+          flatIdx = weekEnd;
+          const weekDone = slotCount>0 && weekEnd<=pos.completedCount;
+          const weekCurrent = !weekDone && weekStart<pos.totalWorkouts && weekStart<=pos.completedCount && !pos.complete && wi===(pos.next?pos.next.weekIndex:-1);
+          const routineNames = (w.routineIds||[]).map(rid=>{ const r=routineById(rid); return r?escapeHtml(r.name):'(deleted routine)'; }).join(', ') || 'No workouts';
+          const statusIcon = weekDone
+            ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>`
+            : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${weekCurrent?'var(--blue)':'var(--faint)'}" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>`;
+          return `<div class="list-row" style="cursor:default;${weekCurrent?'background:rgba(90,135,245,0.06);margin:0 -14px;padding:11px 14px;width:calc(100% + 28px);':''}">
+            ${statusIcon}
+            <div class="lr-main"><div class="lr-title">Week ${wi+1}${w.phase?' · '+escapeHtml(w.phase):''}${weekCurrent?' <span class="chip current-chip">Now</span>':''}</div><div class="lr-sub">${routineNames}</div></div>
+          </div>`;
+        }).join('');
+      })() || `<div class="sub" style="padding:4px 0;">No weeks yet.</div>`}
     </div>
     <div class="row" style="margin-bottom:12px;">
       <button class="btn" id="editProgram">Edit Program</button>
@@ -3214,7 +3302,7 @@ function previousSetsForExercise(exerciseId, excludeSessionId){
 // secondary reinforcement, not the only signal).
 const SUGGEST_LABELS = { up:'Try', continue:'Continue', repeat:'Repeat' };
 const SUGGEST_ICON_PATHS = {
-  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  up: '<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>',
   continue: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/>',
   repeat: '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>'
 };
@@ -3660,6 +3748,35 @@ function renderActiveSession(root){
           if(!set.done) toggleDone();
         });
       });
+      // V29: stepper +/- buttons adjust the adjacent input's value, then
+      // dispatch a real 'input' event -- so they run through the exact same
+      // listener above (parse, unit conversion, save) instead of duplicating
+      // that logic. Base value falls back to the field's ghost placeholder
+      // (last session's number) when the field is still empty, so tapping +
+      // from blank starts from something meaningful rather than from 0.
+      $$('.stepper-btn[data-stepfield]', row).forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const field = btn.dataset.stepfield;
+          const step = parseFloat(btn.dataset.step);
+          const inp = $(`input[data-field="${field}"]`, row);
+          if(!inp) return;
+          const base = inp.value!=='' ? parseFloat(inp.value) : (parseFloat(inp.placeholder)||0);
+          const next = Math.max(0, (Number.isFinite(base)?base:0) + step);
+          inp.value = field==='reps' ? String(Math.round(next)) : fmt1(next);
+          inp.dispatchEvent(new Event('input', {bubbles:true}));
+        });
+      });
+      const expandBtn = $('.set-expand', row);
+      if(expandBtn) expandBtn.addEventListener('click', ()=>{
+        const e = exById(entry.exerciseId);
+        const prevSets = e ? previousSetsForExercise(e.id, s.id) : [];
+        openSetDetailModal({
+          exerciseName: e ? e.name : '?', entry, set, si,
+          prevSet: prevSets[si], suggestion: suggestNextLoad(entry, prevSets),
+          onChange: ()=>{ save(); renderExBlocks(); renderSessionStats(); },
+          onToggleDone: toggleDone
+        });
+      });
       const tagBtn = $('.set-tagbtn', row);
       if(tagBtn) tagBtn.addEventListener('click', ()=>{
         const order = ['Working','Warmup','Drop','Failure'];
@@ -3798,8 +3915,16 @@ function setRowHtml(type, set, si, gi, ii, prevSet, isCurrent){
   };
   let fields = '';
   if(type==='weight_reps'){
-    fields = `<input type="number" step="0.5" inputmode="decimal" data-field="weight" placeholder="${ph('weight')||u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
-      <input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+    const weightInput = `<input type="number" step="0.5" inputmode="decimal" data-field="weight" placeholder="${ph('weight')||u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">`;
+    const repsInput = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+    // V29: the set you're actually working on gets tap-to-adjust +/- steppers
+    // (matches the reference design's focused set-entry pattern); every
+    // other row stays a plain compact field -- same inputs either way, nothing
+    // about direct typing changes, so existing save/keyboard wiring is untouched.
+    fields = isCurrent
+      ? `<div class="stepper set-stepper"><button type="button" class="stepper-btn" data-stepfield="weight" data-step="-5" aria-label="Decrease weight">−</button>${weightInput}<button type="button" class="stepper-btn" data-stepfield="weight" data-step="5" aria-label="Increase weight">+</button></div>
+      <div class="stepper set-stepper"><button type="button" class="stepper-btn" data-stepfield="reps" data-step="-1" aria-label="Decrease reps">−</button>${repsInput}<button type="button" class="stepper-btn" data-stepfield="reps" data-step="1" aria-label="Increase reps">+</button></div>`
+      : `${weightInput}${repsInput}`;
   } else if(type==='bodyweight'){
     fields = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
   } else if(type==='assisted'){
@@ -3815,10 +3940,14 @@ function setRowHtml(type, set, si, gi, ii, prevSet, isCurrent){
   const rpeField = DB.settings.showRPE
     ? `<input type="number" step="0.5" min="1" max="10" class="rpe-input" data-field="rpe" placeholder="–" value="${set.rpe??''}">`
     : '';
+  const expandBtn = (isCurrent && type==='weight_reps')
+    ? `<button class="set-expand" data-setdetail="${gi}:${ii}:${si}" title="Set details" aria-label="Open set ${si+1} details"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>`
+    : '';
   return `<div class="set-row ${set.done?'done':''} ${isCurrent?'current':''}" data-gi="${gi}" data-ii="${ii}" data-si="${si}">
     <div class="set-idx">${si+1}</div>
     ${fields}
     ${rpeField}
+    ${expandBtn}
     <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}" aria-label="Set ${si+1} tag: ${escapeHtml(set.tag||'Working')}, tap to change">${setTagAbbrev(set.tag)}</button>
     <div class="set-check ${set.done?'done':''}" role="button" tabindex="0" aria-label="Mark set ${si+1} ${set.done?'not done':'done'}" aria-pressed="${!!set.done}"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
     <button class="set-del" title="Delete this set" aria-label="Delete set ${si+1}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
@@ -3826,6 +3955,72 @@ function setRowHtml(type, set, si, gi, ii, prevSet, isCurrent){
 }
 function setTagAbbrev(tag){
   return {Working:'W', Warmup:'WU', Drop:'D', Failure:'F'}[tag] || 'W';
+}
+
+/* Full-screen-style set-focus modal (weight_reps sets only) -- the compact
+   inline stepper on .set-row.current already covers fast logging, this is
+   the larger "step back and look at just this set" view from the reference
+   design (LAST TIME / TARGET / TODAY, a bigger stepper, and the same
+   progression suggestion as the inline card). It edits the exact same
+   `set`/`entry` objects the inline row does, so there's no separate copy of
+   the data to keep in sync -- onChange just re-renders the exercise list
+   from the shared session state. */
+function openSetDetailModal({exerciseName, entry, set, si, prevSet, suggestion, onChange, onToggleDone}){
+  const u = unitLabel();
+  const targetLine = entryTargetLine(entry) || 'No target set';
+  const lastLine = prevSet && prevSet.weight!=null && prevSet.reps!=null ? `${fmt1(toDisplayWeight(prevSet.weight))} ${u} × ${prevSet.reps}` : '—';
+  const todayLine = set.weight!=null && set.reps!=null ? `${fmt1(toDisplayWeight(set.weight))} ${u} × ${set.reps}` : 'Not logged yet';
+  const back = openModal(`
+    <div class="modal-head">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0;">
+        <div class="icon-badge" style="background:var(--blue-dim);color:var(--blue-tint);"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6.5 6.5l11 11"/><path d="M4 9l3-3 2.5 2.5-3 3zM20 15l-3 3-2.5-2.5 3-3z"/></svg></div>
+        <div style="min-width:0;"><h3 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(exerciseName)}</h3><div class="sub">Set ${si+1} of ${entry.sets.length}</div></div>
+      </div>
+      <button class="icon-btn" id="mClose" aria-label="Close">✕</button>
+    </div>
+    <div class="ms-detail-grid" style="grid-template-columns:repeat(3,1fr);padding:0 0 4px;margin-bottom:12px;">
+      <div style="display:flex;flex-direction:column;gap:2px;"><span class="ms-detail-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">Last Time</span><span class="mono" style="font-size:12.5px;">${escapeHtml(lastLine)}</span></div>
+      <div style="display:flex;flex-direction:column;gap:2px;"><span class="ms-detail-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">Target</span><span class="mono" style="font-size:12.5px;">${escapeHtml(targetLine)}</span></div>
+      <div style="display:flex;flex-direction:column;gap:2px;"><span class="ms-detail-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">Today</span><span class="mono" style="font-size:12.5px;color:var(--blue-tint);">${escapeHtml(todayLine)}</span></div>
+    </div>
+    ${suggestion ? `<div class="ex-suggest ex-suggest-${suggestion.type}" style="margin:0 0 14px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SUGGEST_ICON_PATHS[suggestion.type]}</svg><span class="ll-lbl">${SUGGEST_LABELS[suggestion.type]}</span><span class="ll-val">${escapeHtml(suggestion.message)}</span></div>` : ''}
+    <div class="field"><label>Weight (${u})</label>
+      <div class="stepper" style="height:52px;">
+        <button type="button" class="stepper-btn" id="sdWMinus" style="width:52px;height:52px;font-size:24px;" aria-label="Decrease weight">−</button>
+        <input type="number" step="0.5" inputmode="decimal" id="sdWeight" style="font-size:26px;" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
+        <button type="button" class="stepper-btn" id="sdWPlus" style="width:52px;height:52px;font-size:24px;" aria-label="Increase weight">+</button>
+      </div>
+    </div>
+    <div class="field"><label>Reps</label>
+      <div class="stepper" style="height:52px;">
+        <button type="button" class="stepper-btn" id="sdRMinus" style="width:52px;height:52px;font-size:24px;" aria-label="Decrease reps">−</button>
+        <input type="number" step="1" inputmode="numeric" id="sdReps" style="font-size:26px;" value="${set.reps??''}">
+        <button type="button" class="stepper-btn" id="sdRPlus" style="width:52px;height:52px;font-size:24px;" aria-label="Increase reps">+</button>
+      </div>
+    </div>
+    <label class="row" style="align-items:center;gap:10px;margin-bottom:16px;font-size:13.5px;">
+      <input type="checkbox" id="sdDone" ${set.done?'checked':''} style="width:20px;height:20px;flex:none;accent-color:var(--blue);"> Mark as completed
+    </label>
+    <button class="btn btn-primary btn-block" id="sdLog" style="margin-bottom:8px;">Log Set</button>
+    <button class="btn btn-ghost btn-block" id="sdCancel">Cancel</button>
+  `, {id:'setdetail', center:true});
+  back.classList.add('workout-dark');
+  const wInp = $('#sdWeight', back), rInp = $('#sdReps', back);
+  $('#sdWMinus', back).addEventListener('click', ()=>{ wInp.value = fmt1(Math.max(0,(parseFloat(wInp.value)||0)-5)); });
+  $('#sdWPlus', back).addEventListener('click', ()=>{ wInp.value = fmt1((parseFloat(wInp.value)||0)+5); });
+  $('#sdRMinus', back).addEventListener('click', ()=>{ rInp.value = String(Math.max(0,(parseInt(rInp.value)||0)-1)); });
+  $('#sdRPlus', back).addEventListener('click', ()=>{ rInp.value = String((parseInt(rInp.value)||0)+1); });
+  $('#sdCancel', back).addEventListener('click', ()=> closeModal('setdetail'));
+  $('#sdLog', back).addEventListener('click', ()=>{
+    const wv = wInp.value===''? null : parseFloat(wInp.value);
+    const rv = rInp.value===''? null : parseInt(rInp.value);
+    set.weight = wv===null? null : fromDisplayWeight(wv);
+    set.reps = rv;
+    const shouldBeDone = $('#sdDone', back).checked;
+    if(shouldBeDone!==!!set.done) onToggleDone(); // handles save() + rest timer + PR toast
+    onChange(); // save() + full re-render, so the row reflects the new weight/reps either way
+    closeModal('setdetail');
+  });
 }
 
 /* ---------------- Rest Timer ----------------
@@ -4218,9 +4413,16 @@ function renderDiary(root){
       <button class="icon-btn" id="nextDay" aria-label="Next day">›</button>
     </div>
     <div class="card">
-      <div class="card-title">Calories <span class="tick">Goal ${goals.calories}</span></div>
-      <div class="pbar ${totals.calories>goals.calories?'red':'ember'}" style="margin-bottom:6px;"><div style="width:${clamp(totals.calories/goals.calories*100,0,100)}%"></div></div>
-      <div class="row" style="font-size:12.5px;color:var(--muted);">
+      <div class="card-title">Daily Summary <span class="tick">Goal ${goals.calories}</span></div>
+      <div style="display:flex;align-items:center;gap:16px;">
+        ${gaugeBlock(clamp(totals.calories/goals.calories*100,0,100), fmtInt(totals.calories), 'kcal', `of ${fmtInt(goals.calories)}`, totals.calories>goals.calories?'var(--red)':'var(--ember)')}
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;">
+          ${dailySummaryMacroRow('Protein', totals.protein, goals.protein, 'var(--blue)')}
+          ${dailySummaryMacroRow('Carbs', totals.carbs, goals.carbs, 'var(--ember)')}
+          ${dailySummaryMacroRow('Fat', totals.fat, goals.fat, 'var(--green)')}
+        </div>
+      </div>
+      <div class="row" style="font-size:12.5px;color:var(--muted);margin-top:12px;padding-top:12px;border-top:1px solid var(--line);">
         <div>Eaten: <span class="mono" style="color:var(--paper);">${fmtInt(totals.calories)}</span></div>
         <div>Burned: <span class="mono" style="color:var(--paper);">${fmtInt(totals.burned)}</span></div>
         <div>Left: <span class="mono" style="color:var(--paper);">${fmtInt(Math.max(0,goals.calories-totals.calories+totals.burned))}</span></div>
@@ -4318,6 +4520,16 @@ function macroBar(label, val, goal, color){
   const pct = clamp(val/goal*100,0,100);
   return `<div class="macro-line"><div class="m-lbl">${label}</div><div class="pbar ${color}"><div style="width:${pct}%"></div></div><div class="m-val">${fmtInt(val)} / ${fmtInt(goal)}</div></div>`;
 }
+/* Compact label+number row (no bar) used beside the Daily Summary calorie
+   ring -- the full macro bars still live in the Macros card below, this is
+   just the at-a-glance number the mockup shows next to the ring. */
+function dailySummaryMacroRow(label, val, goal, dotColor){
+  return `<div style="display:flex;align-items:center;gap:7px;font-size:12.5px;">
+    <span style="width:7px;height:7px;border-radius:50%;flex:none;background:${dotColor};"></span>
+    <span style="color:var(--muted);flex:1;">${label}</span>
+    <span class="mono" style="color:var(--paper);">${fmtInt(val)}g<span style="color:var(--muted);">/${fmtInt(goal)}g</span></span>
+  </div>`;
+}
 
 /* ---------------- Food Picker Modal ---------------- */
 function openFoodPicker(date, meal){
@@ -4412,8 +4624,10 @@ function openFoodPicker(date, meal){
     }
 
     function foodRowHtml(f){
+      const logCount = foodLogCounts().get(f.id)||0;
       return `<div class="list-row" data-food="${f.id}" style="cursor:pointer;">
-        <div class="lr-main"><div class="lr-title" style="display:flex;align-items:center;gap:6px;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>${f.barcode?'<span class="food-badge">Barcode</span>':''}</div><div class="lr-sub">${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal · P${fmtInt(f.protein)} C${fmtInt(f.carbs)} F${fmtInt(f.fat)}</div></div>
+        <div class="icon-badge icon-badge-sm" style="background:rgba(245,154,75,0.14);color:var(--ember);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 2v3M10 2v3M14 2v3"/></svg></div>
+        <div class="lr-main"><div class="lr-title" style="display:flex;align-items:center;gap:6px;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>${f.barcode?'<span class="food-badge">Barcode</span>':''}${logCount>0?`<span class="sub" style="font-size:10.5px;">★ ${logCount} log${logCount!==1?'s':''}</span>`:''}</div><div class="lr-sub">${fmtInt(f.calories)} cal · ${fmtInt(f.protein)}g protein · ${fmtInt(f.fat)}g fat</div></div>
         <button class="fav-star ${f.favorite?'on':''}" data-fav="${f.id}" title="${f.favorite?'Remove favorite':'Add favorite'}" aria-label="${f.favorite?'Remove favorite':'Add favorite'}">${f.favorite?'★':'☆'}</button>
       </div>`;
     }
@@ -4868,6 +5082,10 @@ const PROGRESS_RANGES = [
 const PROGRESS_HISTORY_PAGE = 20;
 let progressChartRange = 'All'; // 'All' keeps the pre-V25 all-time chart behavior as the default
 let progressHistoryExpanded = false;
+// V29: a fixed, repeating color per muscle-group row (bar + dot), purely
+// decorative categorization -- never the only signal for anything (the
+// category name label is always shown alongside it).
+const MUSCLE_DOT_COLORS = ['#5A87F5','#3BD182','#F59A4B','#B073F0','#F06AA6'];
 
 renderers.progress = function(){
   const root = $('#screen-progress');
@@ -4899,7 +5117,15 @@ renderers.progress = function(){
   root.innerHTML = `
     <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
     <div class="card">
-      <div class="card-title">Weight Trend</div>
+      <div class="card-title">Weight Trend${weightChange && weightChange.deltaLbs!==0 ? (()=>{
+          const pct = weightChange.baseWeightLbs ? Math.round(Math.abs(weightChange.deltaLbs)/weightChange.baseWeightLbs*100) : null;
+          const isLoss = weightChange.deltaLbs<0;
+          // Green only when the change actually moves toward the user's own
+          // stated goal direction (lose vs gain) -- a smaller number isn't
+          // automatically "good" for someone whose goal is to gain.
+          const towardGoal = (weight.direction==='lose' && isLoss) || (weight.direction==='gain' && !isLoss);
+          return ` <span class="pct-badge ${towardGoal?'up':'down'}">${isLoss?'-':'+'}${pct!=null?pct+'%':fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))+' '+unitLabel()}</span>`;
+        })() : ''}</div>
       <div class="range-row" role="group" aria-label="Chart time range">
         ${PROGRESS_RANGES.map(r=>`<button class="range-chip ${r.key===progressChartRange?'active':''}" data-range="${r.key}" aria-pressed="${r.key===progressChartRange}">${r.key}</button>`).join('')}
       </div>
@@ -4925,12 +5151,21 @@ renderers.progress = function(){
       ${muscleNow.length ? (()=>{
         const priorMap = new Map(muscleBefore||[]);
         const maxVal = muscleNow[0][1];
-        return muscleNow.map(([cat,n])=>{
-          const delta = muscleBefore ? n-(priorMap.get(cat)||0) : null;
+        return muscleNow.map(([cat,n],i)=>{
+          const prior = muscleBefore ? (priorMap.get(cat)||0) : null;
+          const delta = prior!=null ? n-prior : null;
+          // % change when there's a real prior baseline to divide by; a raw
+          // set-count delta (matching the row's own units) when the muscle
+          // group had zero sets last period, since "+400%" from a base of 0
+          // working sets isn't a real percentage.
+          const deltaLabel = delta==null || delta===0 ? null
+            : (prior>0 ? `${delta>0?'+':''}${Math.round(delta/prior*100)}%` : `${delta>0?'+':''}${delta}`);
           return `<div class="mg-row">
+            <span class="mg-dot" style="background:${MUSCLE_DOT_COLORS[i%MUSCLE_DOT_COLORS.length]};"></span>
             <div class="mg-cat">${escapeHtml(cat)}</div>
-            <div class="pbar blue" style="flex:1;"><div style="width:${clamp(n/Math.max(1,maxVal)*100,4,100)}%"></div></div>
-            <div class="mg-val mono">${n}${delta!=null && delta!==0 ? ` <span class="mg-delta ${delta>0?'up':'down'}">${delta>0?'+':''}${delta}</span>` : ''}</div>
+            <div class="pbar blue" style="flex:1;"><div style="width:${clamp(n/Math.max(1,maxVal)*100,4,100)}%;background:${MUSCLE_DOT_COLORS[i%MUSCLE_DOT_COLORS.length]};"></div></div>
+            <div class="mg-val mono">${n} sets</div>
+            ${deltaLabel ? `<span class="pct-badge ${delta>0?'up':'down'}">${deltaLabel}</span>` : ''}
           </div>`;
         }).join('');
       })() : `<div class="sub" style="padding:4px 0;">No working sets logged in this range yet.</div>`}
@@ -5127,6 +5362,13 @@ function openSettingsModal(){
     const s = DB.settings;
     const html = `
       <div class="modal-head"><h3>Settings</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px;">
+        <div class="icon-badge" style="width:48px;height:48px;border-radius:14px;background:rgba(90,135,245,0.14);color:var(--blue-tint);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg></div>
+        <div style="min-width:0;">
+          <div style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:16px;text-transform:uppercase;">${escapeHtml(unitLabel()==='kg'?'Metric':'Imperial')} · Local Data</div>
+          <div class="sub">${s.lastSavedAt? 'Saved '+new Date(s.lastSavedAt).toLocaleString() : 'Nothing saved yet'}</div>
+        </div>
+      </div>
       <div class="card-title">Preferences</div>
       <div class="field"><label>Units</label>
         <div class="seg"><button data-u="lbs" class="${s.units==='lbs'?'active':''}">Imperial (lbs)</button><button data-u="kg" class="${s.units==='kg'?'active':''}">Metric (kg)</button></div>

@@ -1,31 +1,59 @@
 :root{
-  --ink:#0E1116;
-  --surface:#151A21;
-  --surface-2:#1B212A;
-  --surface-3:#1E242D;
-  --line:#232A33;
-  --line-2:#2A323D;
-  --paper:#E9ECF1;
-  --muted:#8A93A2;
-  --muted-2:#7C8595;
-  --faint:#5A6272;
-  --faint-2:#6B7483;
-  --blue:#5A87F5;
-  --blue-dim:#294A94;
-  --blue-line:#33475e;
-  --blue-tint:#8FAAFA;
-  --ember:#F59A4B;
-  --ember-dim:#8C4A1F;
-  --green:#3BD182;
-  --red:#FF5470;
+  /* V29.1: light neutral app shell + deep navy workout experience + bright
+     blue actions, per the supplied mockup's exact palette. --ink/--blue/
+     --green/--ember/--red are the constant brand hues; everything else
+     (surfaces/lines/text) is themed light here and re-themed dark by
+     .workout-dark below, so the same class names work in both contexts. */
+  --bg:#F0F0F0;
+  --ink:#001020;
+  --surface:#FFFFFF;
+  --surface-2:#E7ECEF;
+  --surface-3:#D7DEE3;
+  --line:#DEE3E7;
+  --line-2:#CDD5DA;
+  --paper:#0B1826;
+  --muted:#5E6B76;
+  --muted-2:#4C5964;
+  --faint:#98A3AC;
+  --faint-2:#7E8B94;
+  --blue:#2080F0;
+  --blue-dim:#DCEBFC;
+  --blue-line:#A9CDF5;
+  --blue-tint:#0F63C7;
+  --ember:#D97C1F;
+  --ember-dim:#FBE4C8;
+  --green:#16A34A;
+  --red:#D6293B;
   --radius:16px;
   --radius-sm:10px;
   font-size:16px;
 }
+/* V29.1: deep-navy workout scope, applied to #screen-workout only while an
+   active session is in progress (see renderers.workout in app.js). Brand
+   hues (--ink/--blue/--green/--ember/--red) stay constant; only surfaces,
+   lines and text re-theme for the dark context, so every existing
+   card/button/chip rule works unchanged in both themes. */
+.workout-dark{
+  --surface:#0C1E33;
+  --surface-2:#122A44;
+  --surface-3:#173355;
+  --line:#1E3A5A;
+  --line-2:#28496C;
+  --paper:#EAF2FA;
+  --muted:#8FA6BC;
+  --muted-2:#7996AE;
+  --faint:#4E6C89;
+  --faint-2:#5F7E9B;
+  --blue-dim:#123A63;
+  --blue-line:#2F6FAE;
+  --blue-tint:#6CB4FF;
+  --ember-dim:#4A2C10;
+  background:var(--ink);
+}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 html,body{margin:0;padding:0;height:100%;}
 body{
-  background:var(--ink);
+  background:var(--bg);
   color:var(--paper);
   font-family:'Figtree', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   min-height:100vh;
@@ -49,18 +77,37 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   *{animation-duration:0.001ms !important; transition-duration:0.001ms !important;}
 }
 
-#app{max-width:520px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;position:relative;background:var(--ink);}
+#app{max-width:520px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;position:relative;background:var(--bg);}
 
 /* ---------- Top bar ---------- */
+/* One row, matching the reference: bold navy "E1" badge + FITNESS
+   wordmark, a vertical divider, then the muted "Track / Progress / Build a
+   Stronger You" breadcrumb. The reference has no settings icon in this row
+   at all (it's a marketing header, not the live app chrome) -- the gear
+   still has to live somewhere for Settings to be reachable, so it floats
+   top-right instead of sitting in the flex row and eating into the
+   breadcrumb's width budget. */
 .topbar{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:calc(18px + env(safe-area-inset-top)) 18px 10px 18px;
+  position:relative;
+  padding:calc(14px + env(safe-area-inset-top)) 46px 12px 18px;
+  border-bottom:1px solid var(--line);
 }
-.brand{display:flex;align-items:baseline;gap:6px;}
-.brand .e1{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-weight:700;font-size:22px;letter-spacing:0.01em;color:var(--paper);}
-.brand .e1 span{color:var(--blue);}
-.brand .e1 .dot{color:var(--ember);}
-.topbar .date{color:var(--muted);font-size:12px;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;letter-spacing:0.03em;text-transform:uppercase;}
+.brand{display:inline-flex;align-items:center;gap:8px;vertical-align:middle;}
+.brand-badge{
+  font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-weight:700;font-size:13px;letter-spacing:0.01em;
+  color:#fff;background:var(--ink);border-radius:7px;padding:4px 7px;line-height:1;flex:none;
+}
+.brand-word{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-weight:700;font-size:19px;letter-spacing:0.01em;color:var(--ink);flex:none;}
+.topbar-divider{display:inline-block;width:1px;height:16px;background:var(--line-2);margin:0 12px;vertical-align:middle;}
+.tl-crumbs{
+  display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  vertical-align:middle;font-size:13.5px;color:var(--muted);
+}
+.tl-sep{color:var(--faint);margin:0 6px;}
+/* Not shown in the reference header -- kept in the DOM (updateTopDate()
+   still writes to it) but out of the visual layout. */
+.topbar .date{display:none;}
+#settingsBtn{position:absolute;top:calc(10px + env(safe-area-inset-top));right:14px;width:34px;height:34px;}
 .icon-btn{
   background:var(--surface-2);border:1px solid var(--line);border-radius:10px;
   width:38px;height:38px;display:flex;align-items:center;justify-content:center;color:var(--paper);
@@ -69,26 +116,35 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .icon-btn:disabled{opacity:.35;pointer-events:none;}
 
 /* ---------- Nav ---------- */
+/* Bottom nav is always deep navy in the mockup regardless of the screen
+   above it, so it is styled with fixed colors rather than the themed
+   surface variables (which flip between light and dark by screen). */
 .tabbar{
   position:sticky;bottom:0;left:0;right:0;
-  display:flex;background:rgba(21,26,33,0.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border-top:1px solid var(--line);
+  display:flex;background:rgba(0,16,32,0.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-top:1px solid rgba(255,255,255,0.08);
   padding:8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
   z-index:40;margin-top:auto;
 }
 .tab-btn{
   flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;
-  background:none;border:none;color:var(--faint);padding:7px 2px;border-radius:10px;min-height:44px;
+  background:none;border:none;color:#5F7E9B;padding:7px 2px;border-radius:10px;min-height:44px;
   font-size:10.5px;font-family:'Oswald','Arial Narrow',Impact,sans-serif;letter-spacing:0.05em;text-transform:uppercase;
   transition:color .15s;
 }
-.tab-btn.active{color:var(--paper);}
-.tab-btn svg{width:21px;height:21px;stroke:var(--faint);fill:none;stroke-width:1.9;transition:stroke .15s;}
+.tab-btn.active{color:#EAF2FA;}
+.tab-btn svg{width:21px;height:21px;stroke:#5F7E9B;fill:none;stroke-width:1.9;transition:stroke .15s;}
 .tab-btn.active svg{stroke:var(--blue);}
 .tab-btn.active[data-tab="nutrition"] svg{stroke:var(--ember);}
 
 /* ---------- Screens ---------- */
-.screen{flex:1;padding:0 16px 24px 16px;overflow-y:auto;animation:e1in .18s ease-out;}
+/* Re-assert color from the local --paper (rather than relying on
+   inheriting body's already-computed color) so .workout-dark's redefined
+   --paper actually reaches descendant text -- CSS custom properties
+   cascade live, but the `color` property itself only inherits its
+   ancestor's already-resolved value, not a var() waiting to be
+   re-evaluated deeper in the tree. */
+.screen{flex:1;padding:0 16px 24px 16px;overflow-y:auto;animation:e1in .18s ease-out;color:var(--paper);}
 /* Subtle entrance on genuine navigation only (see resetScreenScroll/
    playScreenEnter) — short enough not to read as an animation, just a hint
    that a new screen has arrived rather than a webpage swap. */
@@ -114,7 +170,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .card-title .tick{color:var(--faint);font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:10px;}
 
 /* ---------- Hero card (today's routine / featured) ---------- */
-.hero-card{border-radius:18px;padding:1px;background:linear-gradient(150deg,var(--blue) 0%,#2b3a63 45%,var(--line) 100%);margin-bottom:12px;}
+.hero-card{border-radius:18px;padding:1px;background:linear-gradient(150deg,var(--blue) 0%,var(--ink) 45%,var(--line) 100%);margin-bottom:12px;}
 .hero-card-in{border-radius:17px;background:var(--surface);padding:16px 16px 14px;}
 .hero-eyebrow{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:0.1em;color:var(--blue-tint);text-transform:uppercase;}
 .hero-title{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:26px;line-height:1.05;margin-top:5px;text-transform:uppercase;letter-spacing:0.01em;}
@@ -136,6 +192,42 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .btn-danger{background:transparent;border-color:var(--red);color:var(--red);}
 .btn-sm{padding:7px 12px;font-size:12.5px;border-radius:8px;}
 
+/* ---------- V29: shared visual-language components ---------- */
+/* Colored circular icon badge -- used for quick-nav tiles, program list
+   rows, and food rows. Color is passed via inline style (background tint +
+   icon color) from a small fixed palette so every use stays visually
+   consistent rather than picking arbitrary colors per call site. */
+.icon-badge{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:none;}
+.icon-badge svg{width:19px;height:19px;}
+.icon-badge-sm{width:34px;height:34px;border-radius:10px;}
+.icon-badge-sm svg{width:16px;height:16px;}
+
+/* Green "Active" status pill -- distinct from .chip.current-chip (blue,
+   used for "Now" inside a workout) so "this program is the one I'm
+   following" and "this is the exercise I'm on right now" never look like
+   the same kind of badge. */
+.badge-active{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--green);background:rgba(22,163,74,0.14);border-radius:20px;padding:3px 9px;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+.badge-active::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);}
+
+/* Small +/-% change pill, e.g. on a chart card corner or a muscle-group row. */
+.pct-badge{font-size:11px;font-weight:700;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;padding:2px 7px;border-radius:20px;flex:none;}
+.pct-badge.up{color:var(--green);background:rgba(22,163,74,0.14);}
+.pct-badge.down{color:var(--muted);background:var(--surface-3);}
+
+/* Numeric stepper -- flanks a normal <input type=number> (still freely
+   typeable, nothing about direct entry is removed) with -/+ tap targets
+   for fast one-hand adjustment between sets. */
+.stepper{display:flex;align-items:stretch;gap:8px;}
+.stepper-btn{width:44px;height:44px;flex:none;border-radius:12px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--paper);font-size:20px;font-weight:600;display:flex;align-items:center;justify-content:center;}
+.stepper-btn:active{transform:scale(0.94);}
+.stepper input{flex:1;min-width:0;text-align:center;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:22px;font-weight:600;background:var(--surface-2);border:1px solid var(--line-2);border-radius:12px;color:var(--paper);min-height:44px;}
+
+/* List row with a leading icon-badge, used for program/quick-nav grids. */
+.tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:13px;display:flex;flex-direction:column;gap:9px;}
+.tile-lbl{font-size:12.5px;font-weight:600;color:var(--paper);}
+.tile-sub{font-size:10.5px;color:var(--muted);margin-top:-6px;}
+
 /* ---------- Gauge (signature element) ---------- */
 .gauge-row{display:flex;gap:10px;}
 .water-quickadd-row{display:flex;align-items:center;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);}
@@ -152,7 +244,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .goal-row:last-child{margin-bottom:0;}
 .goal-row-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:12.5px;color:var(--paper);margin-bottom:5px;}
 .goal-row-top .mono{color:var(--muted);font-size:12px;}
-.mg-row{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
+.mg-dot{width:8px;height:8px;border-radius:50%;flex:none;}
+.mg-row{display:flex;align-items:center;gap:8px;margin-bottom:9px;}
 .mg-row:last-child{margin-bottom:0;}
 .mg-cat{width:74px;flex:none;font-size:11.5px;color:var(--muted-2);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .mg-val{flex:none;text-align:right;font-size:12px;color:var(--paper);white-space:nowrap;}
@@ -199,9 +292,9 @@ textarea.input{resize:vertical;min-height:70px;}
   background:var(--surface-3);color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;
 }
 .chip.warmup{color:var(--muted);}
-.chip.failure{color:var(--red);background:rgba(255,84,112,0.12);}
-.chip.drop{color:var(--ember);background:rgba(255,138,61,0.12);}
-.chip.pr{color:var(--green);background:rgba(47,191,113,0.12);}
+.chip.failure{color:var(--red);background:rgba(214,41,59,0.12);}
+.chip.drop{color:var(--ember);background:rgba(217,124,31,0.12);}
+.chip.pr{color:var(--green);background:rgba(22,163,74,0.12);}
 
 /* progress bars */
 .pbar{height:8px;border-radius:6px;background:var(--surface-3);overflow:hidden;}
@@ -232,11 +325,12 @@ textarea.input{resize:vertical;min-height:70px;}
 }
 .modal-backdrop.center{align-items:center;padding:20px;}
 .modal{
-  background:#171C24;border:1px solid var(--line-2);border-top:1px solid var(--line-2);border-radius:22px 22px 0 0;
+  background:var(--surface);color:var(--paper);border:1px solid var(--line);border-top:1px solid var(--line);border-radius:22px 22px 0 0;
   width:100%;max-width:520px;max-height:88vh;overflow-y:auto;padding:10px 18px calc(20px + env(safe-area-inset-bottom));
   animation:slideup .24s cubic-bezier(.22,.9,.3,1);position:relative;
+  box-shadow:0 -8px 30px rgba(0,16,32,0.12);
 }
-.modal::before{content:'';display:block;width:38px;height:4px;border-radius:3px;background:#39424F;margin:0 auto 14px;}
+.modal::before{content:'';display:block;width:38px;height:4px;border-radius:3px;background:var(--line-2);margin:0 auto 14px;}
 .modal-backdrop.center .modal::before{display:none;}
 .modal-backdrop.center .modal{border-radius:16px;max-height:80vh;}
 @keyframes slideup{from{transform:translateY(24px);opacity:0;}to{transform:translateY(0);opacity:1;}}
@@ -272,27 +366,30 @@ textarea.input{resize:vertical;min-height:70px;}
   max-width:calc(100% - 32px);text-align:center;line-height:1.4;
   display:flex;align-items:center;justify-content:center;gap:12px;
 }
-#toast.pr{border-color:var(--green);background:rgba(59,209,130,0.14);}
+#toast.pr{border-color:var(--green);background:rgba(22,163,74,0.14);}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto;}
 #toast .toast-action{
   flex:none;background:none;border:none;color:var(--blue-tint);font-weight:700;
   font-size:13px;text-transform:uppercase;letter-spacing:.03em;padding:2px;white-space:nowrap;
 }
 
-/* rest timer bar */
+/* Rest timer floats outside #screen-workout (fixed to #restTimerRoot at the
+   body level) so it can't inherit .workout-dark via cascade -- it only ever
+   appears during an active session, so its dark-navy colors are hardcoded
+   to match rather than themed. */
 .rest-timer{
   position:fixed;left:50%;bottom:86px;transform:translateX(-50%);width:calc(100% - 24px);max-width:496px;
-  background:#18222F;border:1px solid var(--blue-line);border-radius:15px;padding:11px 12px;
+  background:#0C1E33;border:1px solid #2F6FAE;border-radius:15px;padding:11px 12px;
   display:flex;align-items:center;gap:11px;z-index:60;box-shadow:0 12px 30px rgba(0,0,0,.5);
   animation:e1in .22s ease-out;
 }
 .rest-timer .rt-ring{position:relative;width:44px;height:44px;flex:none;}
 .rest-timer .rt-ring svg{transform:rotate(-90deg);}
-.rest-timer .rt-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12.5px;font-weight:600;color:var(--blue-tint);}
+.rest-timer .rt-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12.5px;font-weight:600;color:#6CB4FF;}
 .rest-timer .rt-info{flex:1;min-width:0;}
-.rest-timer .rt-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:0.09em;color:var(--blue-tint);text-transform:uppercase;}
-.rest-timer .rt-next{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.rest-timer .rt-plus{flex:none;background:var(--surface-3);border:1px solid var(--blue-line);color:var(--blue-tint);font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12px;padding:9px 10px;border-radius:9px;min-height:38px;}
+.rest-timer .rt-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:0.09em;color:#6CB4FF;text-transform:uppercase;}
+.rest-timer .rt-next{font-size:11.5px;color:#8FA6BC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.rest-timer .rt-plus{flex:none;background:#173355;border:1px solid #2F6FAE;color:#6CB4FF;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12px;padding:9px 10px;border-radius:9px;min-height:38px;}
 .rest-timer .rt-skip{flex:none;background:var(--blue);border:none;color:#fff;font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;padding:10px 12px;border-radius:9px;min-height:38px;}
 @keyframes e1in{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
 
@@ -308,12 +405,12 @@ textarea.input{resize:vertical;min-height:70px;}
    recede slightly once checked off. Kept to color/opacity/a chip toggle,
    no layout shift, so it stays cheap to update on every check-toggle. */
 .exercise-block.current{border-color:var(--blue-line);box-shadow:inset 3px 0 0 var(--blue);}
-.chip.current-chip{color:var(--blue-tint);background:rgba(90,135,245,0.16);margin-left:2px;}
+.chip.current-chip{color:var(--blue-tint);background:rgba(32,128,240,0.16);margin-left:2px;}
 .chip.current-chip[hidden]{display:none;} /* .chip sets display:inline-flex at equal specificity to the UA [hidden] rule, so this must be explicit */
 
 /* exercise set row in active session */
 .set-row{display:flex;align-items:center;gap:6px;padding:6px 0;border-radius:10px;transition:background-color .15s ease,opacity .15s ease;}
-.set-row.current{margin:0 -15px;padding:6px 15px;background:rgba(90,135,245,0.07);}
+.set-row.current{margin:0 -15px;padding:6px 15px;background:rgba(32,128,240,0.08);}
 .set-row.current .set-idx{color:var(--blue-tint);font-weight:700;}
 .set-row.done{opacity:.68;}
 .set-row .set-idx{width:20px;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;color:var(--faint-2);font-size:12px;text-align:center;flex-shrink:0;}
@@ -323,6 +420,24 @@ textarea.input{resize:vertical;min-height:70px;}
   min-height:46px;
 }
 .set-row input:focus-visible{border-color:var(--blue);outline:none;}
+/* V29: the current set's weight/reps fields are wrapped in a compact
+   stepper -- smaller than the general-purpose .stepper-btn (which is sized
+   for full-screen contexts) so it still fits the dense row without pushing
+   other controls off-row, but stays within the 30-38px range already
+   established elsewhere on this screen for compact icon controls. */
+/* The current row swaps two plain inputs for two steppers (4 extra
+   buttons) while keeping the same tag/check/delete controls -- too much
+   for one dense line at narrow widths, so this row alone is allowed to
+   wrap: steppers claim a sensible minimum width and the trailing controls
+   drop to a second line together rather than squeezing the number input
+   down to unreadable/invisible (the bug this replaces). */
+.set-row.current{flex-wrap:wrap;row-gap:8px;}
+.set-row .set-stepper{flex:1 1 128px;min-width:128px;display:flex;align-items:center;gap:4px;}
+.set-row .set-stepper input{width:100%;min-width:40px;padding:10px 2px;font-size:15px;}
+.set-row .set-stepper .stepper-btn{width:28px;height:38px;flex:none;border-radius:8px;font-size:15px;min-height:0;}
+/* Tag/check/delete become their own right-aligned group on the wrapped
+   row, instead of trailing off wherever they happen to land. */
+.set-row.current .set-tagbtn{margin-left:auto;}
 .set-row .set-check{
   width:42px;height:46px;border-radius:10px;border:1px solid var(--line-2);background:var(--surface-2);
   display:flex;align-items:center;justify-content:center;flex-shrink:0;
@@ -331,6 +446,10 @@ textarea.input{resize:vertical;min-height:70px;}
 .set-row .set-check svg{width:18px;height:18px;stroke:var(--muted);fill:none;stroke-width:2.8;}
 .set-row .set-check.done svg{stroke:#08130D;}
 .set-row .set-tagbtn{width:34px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted);font-size:9.5px;flex-shrink:0;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+/* Opens the full set-detail modal (LAST TIME / TARGET / TODAY + a larger
+   stepper) for the current set -- the inline row already covers fast
+   logging, this is the "step back and look at just this set" view. */
+.set-row .set-expand{width:30px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--blue-tint);flex-shrink:0;display:flex;align-items:center;justify-content:center;}
 .set-row .rpe-input{flex:none !important;width:38px !important;min-width:38px;font-size:13px !important;padding:12px 0 !important;}
 .set-row .set-del{width:28px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted-2);flex-shrink:0;display:flex;align-items:center;justify-content:center;}
 .set-row .set-del:disabled{opacity:.32;}
@@ -350,16 +469,20 @@ textarea.input{resize:vertical;min-height:70px;}
 .ex-lasttime svg{flex:none;stroke:var(--ember);}
 .ex-lasttime .ll-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:.07em;color:var(--muted-2);text-transform:uppercase;white-space:nowrap;}
 .ex-lasttime .ll-val{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12.5px;color:var(--paper);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.ex-suggest{display:flex;align-items:center;gap:8px;margin:-3px 15px 11px;background:rgba(90,135,245,0.08);border:1px solid var(--blue-line);border-radius:10px;padding:9px 11px;}
-.ex-suggest svg{flex:none;stroke:var(--blue-tint);}
-.ex-suggest .ll-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:.07em;color:var(--blue-tint);text-transform:uppercase;white-space:nowrap;}
+.ex-suggest{display:flex;align-items:center;gap:8px;margin:-3px 15px 11px;background:rgba(22,163,74,0.08);border:1px solid rgba(22,163,74,0.35);border-radius:10px;padding:9px 11px;}
+.ex-suggest svg{flex:none;stroke:var(--green);}
+.ex-suggest .ll-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:.07em;color:var(--green);text-transform:uppercase;white-space:nowrap;}
 .ex-suggest .ll-val{font-family:'Figtree',sans-serif;font-size:12px;color:var(--paper);white-space:normal;}
-/* V28: 'up' keeps the original blue treatment; 'continue'/'repeat' get a
-   visually distinct (not just re-colored) neutral treatment -- paired with
-   the different icon and label text above, so type is never color-only. */
-.ex-suggest-continue,.ex-suggest-repeat{background:var(--surface-2);border-color:var(--line-2);}
-.ex-suggest-continue svg,.ex-suggest-repeat svg{stroke:var(--muted-2);}
-.ex-suggest-continue .ll-lbl,.ex-suggest-repeat .ll-lbl{color:var(--muted-2);}
+.ex-suggest-continue{background:rgba(32,128,240,0.08);border-color:var(--blue-line);}
+.ex-suggest-continue svg{stroke:var(--blue-tint);}
+.ex-suggest-continue .ll-lbl{color:var(--blue-tint);}
+/* V29: 'up' is green (matches the reference design's positive-progression
+   card); 'continue' is blue (defined above); 'repeat' gets a neutral
+   treatment -- paired with a different icon and label text in every case,
+   so the type is never color-only. */
+.ex-suggest-repeat{background:var(--surface-2);border-color:var(--line-2);}
+.ex-suggest-repeat svg{stroke:var(--muted-2);}
+.ex-suggest-repeat .ll-lbl{color:var(--muted-2);}
 .program-context{display:flex;align-items:center;gap:5px;margin:0 0 10px;font-size:11.5px;color:var(--blue-tint);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;flex-wrap:wrap;}
 .program-context .pc-dot{color:var(--faint);}
 .program-context .pc-name{color:var(--muted);}
@@ -401,7 +524,7 @@ textarea.input{resize:vertical;min-height:70px;}
   flex-shrink:0;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);
   padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap;
 }
-.filter-chip.active{background:var(--paper);color:var(--ink);border-color:var(--paper);}
+.filter-chip.active{background:var(--ink);color:#EAF2FA;border-color:var(--ink);}
 
 .pill-row{display:flex;gap:7px;margin-bottom:12px;}
 .pill-row .btn{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:11px 4px;color:var(--paper);font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:.06em;text-transform:uppercase;}
