@@ -39,13 +39,31 @@ function fmtDuration(totalSec){
   return m+':'+s.toString().padStart(2,'0');
 }
 
+// opts.action = {label, onClick} shows a tappable action (e.g. "Undo") inside
+// the toast itself. Built with textContent/createElement rather than
+// interpolating into innerHTML, so a message built from user-entered text
+// (food names, etc. — many callers do this) can never be treated as markup.
 function toast(msg, opts={}){
   const t = $('#toast');
-  t.textContent = msg;
   t.classList.toggle('pr', !!opts.pr);
+  t.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  t.appendChild(span);
+  if(opts.action){
+    const btn = document.createElement('button');
+    btn.className = 'toast-action';
+    btn.textContent = opts.action.label;
+    btn.addEventListener('click', ()=>{
+      clearTimeout(toast._t);
+      t.classList.remove('show');
+      opts.action.onClick();
+    });
+    t.appendChild(btn);
+  }
   t.classList.add('show');
   clearTimeout(toast._t);
-  toast._t = setTimeout(()=> t.classList.remove('show'), opts.pr ? 3200 : 2200);
+  toast._t = setTimeout(()=> t.classList.remove('show'), opts.action ? 5000 : (opts.pr ? 3200 : 2200));
 }
 
 function escapeHtml(s){
@@ -2179,9 +2197,17 @@ function openAddExerciseModal(){
   $('#neSave').addEventListener('click', ()=>{
     const name = $('#neName').value.trim();
     if(!name){ toast('Give it a name'); return; }
-    DB.exercises.push(ex(name, $('#neCat').value, $('#neEquip').value.trim()||'—', $('#neType').value, $('#neInstr').value.trim()||'No instructions added yet.'));
-    DB.exercises[DB.exercises.length-1].custom = true;
-    save(); closeModal('newex'); toast('Exercise added'); renderCurrent();
+    const addExercise = ()=>{
+      DB.exercises.push(ex(name, $('#neCat').value, $('#neEquip').value.trim()||'—', $('#neType').value, $('#neInstr').value.trim()||'No instructions added yet.'));
+      DB.exercises[DB.exercises.length-1].custom = true;
+      save(); closeModal('newex'); toast('Exercise added'); renderCurrent();
+    };
+    const dup = DB.exercises.find(e=> e.name.toLowerCase()===name.toLowerCase());
+    if(dup){
+      openConfirmModal(`"${dup.name}" already exists in your library. Add another one with the same name?`, addExercise, {title:'Already Exists', confirmLabel:'Add Anyway'});
+      return;
+    }
+    addExercise();
   });
 }
 
@@ -2343,7 +2369,10 @@ function renderRoutinesList(root){
     const st = templateStats(r.id);
     return `<div class="list-row">
       <div class="lr-main" style="cursor:pointer;" data-open="${r.id}"><div class="lr-title">${escapeHtml(r.name)}</div><div class="lr-sub">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Never performed'} · ${st.timesCompleted}× done</div></div>
-      <button class="icon-btn" data-edit="${r.id}" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg></button>
+      <div style="display:flex;gap:6px;flex:none;">
+        <button class="icon-btn" data-dup="${r.id}" title="Duplicate" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+        <button class="icon-btn" data-edit="${r.id}" title="Edit" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg></button>
+      </div>
     </div>`;
   }).join('') || '<div class="empty"><div class="e-title">No templates</div><div class="e-sub">Build one to reuse every week.</div><button class="btn btn-sm btn-primary" id="emptyNewRoutine" style="margin-top:10px;">+ Create Template</button></div>'}
   </div>`;
@@ -2362,6 +2391,21 @@ function renderRoutinesList(root){
     ev.stopPropagation();
     const r = routineById(el.dataset.edit);
     wk.editingRoutineDraft = JSON.parse(JSON.stringify(r));
+    wkNav('routine-edit');
+  }));
+  $$('[data-dup]').forEach(el=> el.addEventListener('click', (ev)=>{
+    ev.stopPropagation();
+    const r = routineById(el.dataset.dup);
+    // Deep-copy via JSON round-trip (same technique used when opening the
+    // editor) so the copy shares no object references with the original —
+    // editing/deleting one can never affect the other.
+    const copy = JSON.parse(JSON.stringify(r));
+    copy.id = uid();
+    copy.name = r.name + ' Copy';
+    DB.routines.push(copy);
+    save();
+    wk.editingRoutineDraft = JSON.parse(JSON.stringify(copy));
+    toast('Duplicated — rename and adjust as needed');
     wkNav('routine-edit');
   }));
 }
@@ -2422,7 +2466,17 @@ function renderRoutineEdit(root){
     const list = $('#groupsList');
     list.innerHTML = draft.groups.map((g,gi)=>`
       <div class="card" style="padding:12px;">
-        <div class="card-title">${g.length>1?'Superset':'Exercise'} ${gi+1} <button class="swipe-del" data-rmgroup="${gi}">Remove</button></div>
+        <div class="card-title">${g.length>1?'Superset':'Exercise'} ${gi+1}
+          <div style="display:flex;gap:4px;align-items:center;">
+            <button class="icon-btn" data-movegroup="${gi}:up" title="Move up" ${gi===0?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button class="icon-btn" data-movegroup="${gi}:down" title="Move down" ${gi===draft.groups.length-1?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+            </button>
+            <button class="swipe-del" data-rmgroup="${gi}">Remove</button>
+          </div>
+        </div>
         ${g.map((item,ii)=>{
           const e = exById(item.exerciseId);
           return `<div class="list-row" data-edititem="${gi}:${ii}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e?e.name:'Unknown')}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div></div>
@@ -2432,6 +2486,15 @@ function renderRoutineEdit(root){
       </div>
     `).join('');
     $$('[data-rmgroup]').forEach(b=> b.addEventListener('click', ()=>{ draft.groups.splice(parseInt(b.dataset.rmgroup),1); renderGroupsList(); }));
+    $$('[data-movegroup]').forEach(b=> b.addEventListener('click', ()=>{
+      const [giRaw, dir] = b.dataset.movegroup.split(':');
+      const gi = parseInt(giRaw);
+      const target = dir==='up' ? gi-1 : gi+1;
+      if(target<0 || target>=draft.groups.length) return;
+      const [moved] = draft.groups.splice(gi,1);
+      draft.groups.splice(target,0,moved);
+      renderGroupsList();
+    }));
     $$('[data-rmitem]').forEach(b=> b.addEventListener('click', (ev)=>{
       ev.stopPropagation();
       const [gi,ii] = b.dataset.rmitem.split(':').map(Number);
@@ -2858,6 +2921,10 @@ function renderActiveSession(root){
             ${targetLine? `<div class="ex-target">${escapeHtml(targetLine)}</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex:none;">
+            ${ii===0 ? `
+            <button class="icon-btn" data-moveex="${gi}:up" title="Move up" ${gi===0?'disabled':''} style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+            <button class="icon-btn" data-moveex="${gi}:down" title="Move down" ${gi===s.groups.length-1?'disabled':''} style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg></button>
+            ` : ''}
             <button class="icon-btn" data-replaceex="${gi}:${ii}" title="Replace exercise" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
             <button class="icon-btn" data-rmex="${gi}:${ii}" title="Remove exercise" style="width:30px;height:30px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
           </div>
@@ -2874,6 +2941,19 @@ function renderActiveSession(root){
       </div>`;
     }).join('')).join('');
 
+    $$('[data-moveex]').forEach(b=> b.addEventListener('click', ()=>{
+      const [giRaw, dir] = b.dataset.moveex.split(':');
+      const gi = parseInt(giRaw);
+      const target = dir==='up' ? gi-1 : gi+1;
+      if(target<0 || target>=s.groups.length) return;
+      const [moved] = s.groups.splice(gi,1);
+      s.groups.splice(target,0,moved);
+      save();
+      // Full re-render (like Add Exercise already does) rather than just
+      // renderExBlocks(), since the exercise pager above is built from group
+      // order at the top of renderActiveSession and needs to reflect the move.
+      renderActiveSession(root);
+    }));
     $$('[data-replaceex]').forEach(b=> b.addEventListener('click', ()=>{
       const [gi,ii] = b.dataset.replaceex.split(':').map(Number);
       const entry = s.groups[gi][ii];
@@ -2971,10 +3051,18 @@ function renderActiveSession(root){
             toast('An exercise needs at least one set — remove the exercise instead');
             return;
           }
-          entry.sets.splice(si,1);
+          const [removed] = entry.sets.splice(si,1);
           save();
           renderExBlocks(); // re-renders with sets re-indexed and stats recomputed below
           renderSessionStats();
+          toast('Set deleted', {action:{label:'Undo', onClick: ()=>{
+            // Re-insert at its original position — if sets were added/removed
+            // since, si may now be past the end, so clamp rather than throw.
+            entry.sets.splice(Math.min(si, entry.sets.length), 0, removed);
+            save();
+            renderExBlocks();
+            renderSessionStats();
+          }}});
         });
       }
     });
