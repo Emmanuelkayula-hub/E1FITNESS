@@ -1,0 +1,594 @@
+:root{
+  /* V29.1: light neutral app shell + deep navy workout experience + bright
+     blue actions, per the supplied mockup's exact palette. --ink/--blue/
+     --green/--ember/--red are the constant brand hues; everything else
+     (surfaces/lines/text) is themed light here and re-themed dark by
+     .workout-dark below, so the same class names work in both contexts. */
+  --bg:#F0F0F0;
+  --ink:#001020;
+  --surface:#FFFFFF;
+  --surface-2:#E7ECEF;
+  --surface-3:#D7DEE3;
+  --line:#DEE3E7;
+  --line-2:#CDD5DA;
+  --paper:#0B1826;
+  --muted:#5E6B76;
+  --muted-2:#4C5964;
+  /* V31.1: darkened from #98A3AC -- the original failed WCAG AA text
+     contrast (2.26:1 on light backgrounds; needs 4.5:1). This value hits
+     ~5.6:1 on white / ~4.9:1 on --bg while staying the same muted gray-blue
+     hue, since --faint is still used decoratively (icon strokes) too. */
+  --faint:#62696F;
+  --faint-2:#7E8B94;
+  --blue:#2080F0;
+  --blue-dim:#DCEBFC;
+  --blue-line:#A9CDF5;
+  --blue-tint:#0F63C7;
+  --ember:#D97C1F;
+  --ember-dim:#FBE4C8;
+  --green:#16A34A;
+  --red:#D6293B;
+  --radius:16px;
+  --radius-sm:10px;
+  font-size:16px;
+}
+/* V29.1: deep-navy workout scope, applied to #screen-workout only while an
+   active session is in progress (see renderers.workout in app.js). Brand
+   hues (--ink/--blue/--green/--ember/--red) stay constant; only surfaces,
+   lines and text re-theme for the dark context, so every existing
+   card/button/chip rule works unchanged in both themes. */
+.workout-dark{
+  --surface:#0C1E33;
+  --surface-2:#122A44;
+  --surface-3:#173355;
+  --line:#1E3A5A;
+  --line-2:#28496C;
+  --paper:#EAF2FA;
+  --muted:#8FA6BC;
+  --muted-2:#7996AE;
+  --faint:#4E6C89;
+  --faint-2:#5F7E9B;
+  --blue-dim:#123A63;
+  --blue-line:#2F6FAE;
+  --blue-tint:#6CB4FF;
+  --ember-dim:#4A2C10;
+  background:var(--ink);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{margin:0;padding:0;height:100%;}
+body{
+  background:var(--bg);
+  color:var(--paper);
+  font-family:'Figtree', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  min-height:100vh;
+  overscroll-behavior-y:none;
+}
+button{font-family:inherit;cursor:pointer;}
+input,select,textarea{font-family:inherit;}
+::selection{background:var(--blue);color:white;}
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-thumb{background:var(--surface-3);border-radius:8px;}
+::-webkit-scrollbar-track{background:transparent;}
+
+/* Baseline line-height for every heading -- previously unset (browser
+   default), which is tight enough that a heading wrapping to two lines
+   (a long exercise/routine/program name) could read as cramped. 1.15 keeps
+   single-line headings visually unchanged while giving wrapped ones real
+   separation between lines. Components needing a different rhythm (e.g.
+   .hero-title, .ex-name) already set their own line-height and win via
+   specificity/source order below. */
+h1,h2,h3,h4{font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:0.02em;margin:0;font-weight:600;line-height:1.15;}
+.mono{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-variant-numeric:tabular-nums;}
+a{color:inherit;}
+.hidden{display:none !important;}
+button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible{
+  outline:2px solid var(--blue); outline-offset:2px;
+}
+@media (prefers-reduced-motion: reduce){
+  *{animation-duration:0.001ms !important; transition-duration:0.001ms !important;}
+}
+
+#app{max-width:520px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;position:relative;background:var(--bg);}
+
+/* ---------- Top bar ---------- */
+/* One row, matching the reference: bold navy "E1" badge + FITNESS
+   wordmark, a vertical divider, then the muted "Track / Progress / Build a
+   Stronger You" breadcrumb. The reference has no settings icon in this row
+   at all (it's a marketing header, not the live app chrome) -- the gear
+   still has to live somewhere for Settings to be reachable, so it floats
+   top-right instead of sitting in the flex row and eating into the
+   breadcrumb's width budget. */
+.topbar{
+  position:relative;
+  padding:calc(14px + env(safe-area-inset-top)) 46px 12px 18px;
+  border-bottom:1px solid var(--line);
+}
+.brand{display:inline-flex;align-items:center;gap:8px;vertical-align:middle;}
+.brand-badge{
+  font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-weight:700;font-size:13px;letter-spacing:0.01em;
+  color:#fff;background:var(--ink);border-radius:7px;padding:4px 7px;line-height:1;flex:none;
+}
+.brand-word{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-weight:700;font-size:19px;letter-spacing:0.01em;color:var(--ink);flex:none;}
+.topbar-divider{display:inline-block;width:1px;height:16px;background:var(--line-2);margin:0 12px;vertical-align:middle;}
+.tl-crumbs{
+  display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  vertical-align:middle;font-size:13.5px;color:var(--muted);
+}
+.tl-sep{color:var(--faint);margin:0 6px;}
+/* Not shown in the reference header -- kept in the DOM (updateTopDate()
+   still writes to it) but out of the visual layout. */
+.topbar .date{display:none;}
+#settingsBtn{position:absolute;top:calc(10px + env(safe-area-inset-top));right:14px;width:34px;height:34px;}
+.icon-btn{
+  background:var(--surface-2);border:1px solid var(--line);border-radius:10px;
+  width:38px;height:38px;display:flex;align-items:center;justify-content:center;color:var(--paper);
+}
+.icon-btn:active{transform:scale(0.94);}
+.icon-btn:disabled{opacity:.35;pointer-events:none;}
+
+/* ---------- Nav ---------- */
+/* Bottom nav is always deep navy in the mockup regardless of the screen
+   above it, so it is styled with fixed colors rather than the themed
+   surface variables (which flip between light and dark by screen). */
+.tabbar{
+  position:sticky;bottom:0;left:0;right:0;
+  display:flex;background:rgba(0,16,32,0.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-top:1px solid rgba(255,255,255,0.08);
+  padding:8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
+  z-index:40;margin-top:auto;
+}
+.tab-btn{
+  flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;
+  background:none;border:none;color:#5F7E9B;padding:7px 2px;border-radius:10px;min-height:44px;
+  font-size:10.5px;font-family:'Oswald','Arial Narrow',Impact,sans-serif;letter-spacing:0.05em;text-transform:uppercase;
+  transition:color .15s;
+}
+.tab-btn.active{color:#EAF2FA;}
+.tab-btn svg{width:21px;height:21px;stroke:#5F7E9B;fill:none;stroke-width:1.9;transition:stroke .15s;}
+.tab-btn.active svg{stroke:var(--blue);}
+.tab-btn.active[data-tab="nutrition"] svg{stroke:var(--ember);}
+
+/* ---------- Screens ---------- */
+/* Re-assert color from the local --paper (rather than relying on
+   inheriting body's already-computed color) so .workout-dark's redefined
+   --paper actually reaches descendant text -- CSS custom properties
+   cascade live, but the `color` property itself only inherits its
+   ancestor's already-resolved value, not a var() waiting to be
+   re-evaluated deeper in the tree. */
+.screen{flex:1;padding:0 16px 24px 16px;overflow-y:auto;animation:e1in .18s ease-out;color:var(--paper);}
+/* Subtle entrance on genuine navigation only (see resetScreenScroll/
+   playScreenEnter) — short enough not to read as an animation, just a hint
+   that a new screen has arrived rather than a webpage swap. */
+.screen-enter{animation:screenEnter .16s ease-out;}
+@keyframes screenEnter{from{opacity:.5;transform:translateY(5px);}to{opacity:1;transform:translateY(0);}}
+/* The rest-timer bar floats fixed above the tabbar; without this, scrolling
+   to the bottom of the active workout (Session Notes / Session stats cards)
+   puts those cards directly behind it. */
+.screen.rest-padding{padding-bottom:128px;}
+.screen-head{margin:6px 0 16px 0;}
+.screen-head h1{font-size:26px;color:var(--paper);}
+/* .sub is the app's general secondary/supporting-text style, used ~50
+   places (card subtitles, program week/phase lines, empty-state body text,
+   etc.) -- it was previously only defined scoped to .screen-head, so every
+   other instance silently fell back to plain body text (full-size,
+   full-contrast) instead of reading as secondary information. That's the
+   real cause of the "everything looks equally important" flatness in
+   several cards, not a spacing issue. */
+.sub{color:var(--muted);font-size:13px;line-height:1.4;}
+.screen-head .sub{margin-top:2px;}
+
+/* ---------- Cards ---------- */
+.card{
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+  padding:15px 14px 13px;margin-bottom:12px;
+}
+.card-title{
+  font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;font-size:11.5px;letter-spacing:0.09em;
+  color:var(--muted-2);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;
+}
+.card-title .tick{color:var(--faint);font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:10px;}
+
+/* ---------- Hero card (today's routine / featured) ---------- */
+.hero-card{border-radius:18px;padding:1px;background:linear-gradient(150deg,var(--blue) 0%,var(--ink) 45%,var(--line) 100%);margin-bottom:12px;}
+.hero-card-in{border-radius:17px;background:var(--surface);padding:16px 16px 14px;}
+.hero-eyebrow{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:0.1em;color:var(--blue-tint);text-transform:uppercase;}
+.hero-title{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:26px;line-height:1.05;margin-top:5px;text-transform:uppercase;letter-spacing:0.01em;}
+.hero-meta{font-size:12.5px;color:var(--muted);margin-top:5px;}
+.hero-tags{display:flex;gap:6px;margin:13px 0 14px;flex-wrap:wrap;}
+.hero-tags span{font-size:11px;color:var(--muted-2);background:var(--surface-3);border:1px solid var(--line-2);padding:4px 9px;border-radius:7px;white-space:nowrap;}
+
+/* ---------- Buttons ---------- */
+.btn{
+  border-radius:10px;border:1px solid var(--line);background:var(--surface-2);color:var(--paper);
+  padding:11px 16px;font-size:14px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+}
+.btn:active{transform:scale(0.98);}
+.btn:disabled{opacity:.55;pointer-events:none;}
+.btn-block{width:100%;}
+.btn-primary{background:var(--blue);border-color:var(--blue);color:#fff;}
+.btn-ember{background:var(--ember);border-color:var(--ember);color:#1B0E00;}
+.btn-ghost{background:transparent;border-color:var(--line);color:var(--muted);}
+.btn-danger{background:transparent;border-color:var(--red);color:var(--red);}
+.btn-sm{padding:7px 12px;font-size:12.5px;border-radius:8px;}
+
+/* ---------- V29: shared visual-language components ---------- */
+/* Colored circular icon badge -- used for quick-nav tiles, program list
+   rows, and food rows. Color is passed via inline style (background tint +
+   icon color) from a small fixed palette so every use stays visually
+   consistent rather than picking arbitrary colors per call site. */
+.icon-badge{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:none;}
+.icon-badge svg{width:19px;height:19px;}
+.icon-badge-sm{width:34px;height:34px;border-radius:10px;}
+.icon-badge-sm svg{width:16px;height:16px;}
+
+/* Green "Active" status pill -- distinct from .chip.current-chip (blue,
+   used for "Now" inside a workout) so "this program is the one I'm
+   following" and "this is the exercise I'm on right now" never look like
+   the same kind of badge. */
+/* V31.1: the badge's own text color is a darkened green (#11823B, ~4.9:1 on
+   its light tint fill) rather than var(--green) directly -- the brand
+   green (#16A34A) only hit 2.82:1 as TEXT on its own rgba(22,163,74,0.14)
+   tint background, which is what actually failed the audit; --green
+   itself is untouched (still used correctly elsewhere: fill colors, and
+   as text against the dark workout surfaces where it already had plenty
+   of contrast). The dot stays the true brand green since it's a small
+   decorative swatch, not text. */
+.badge-active{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#11823B;background:rgba(22,163,74,0.14);border-radius:20px;padding:3px 9px;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+.badge-active::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);}
+
+/* Small +/-% change pill, e.g. on a chart card corner or a muscle-group row. */
+.pct-badge{font-size:11px;font-weight:700;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;padding:2px 7px;border-radius:20px;flex:none;}
+.pct-badge.up{color:#11823B;background:rgba(22,163,74,0.14);}
+.pct-badge.down{color:var(--muted);background:var(--surface-3);}
+
+/* Numeric stepper -- flanks a normal <input type=number> (still freely
+   typeable, nothing about direct entry is removed) with -/+ tap targets
+   for fast one-hand adjustment between sets. */
+.stepper{display:flex;align-items:stretch;gap:8px;}
+.stepper-btn{width:44px;height:44px;flex:none;border-radius:12px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--paper);font-size:20px;font-weight:600;display:flex;align-items:center;justify-content:center;}
+.stepper-btn:active{transform:scale(0.94);}
+.stepper input{flex:1;min-width:0;text-align:center;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:22px;font-weight:600;background:var(--surface-2);border:1px solid var(--line-2);border-radius:12px;color:var(--paper);min-height:44px;}
+
+/* List row with a leading icon-badge, used for program/quick-nav grids. */
+.tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:13px;display:flex;flex-direction:column;gap:9px;}
+.tile > div{display:flex;flex-direction:column;gap:2px;}
+.tile-lbl{font-size:12.5px;font-weight:600;line-height:1.3;color:var(--paper);}
+.tile-sub{font-size:10.5px;line-height:1.3;color:var(--muted);}
+
+/* ---------- Gauge (signature element) ---------- */
+.gauge-row{display:flex;gap:10px;}
+.water-quickadd-row{display:flex;align-items:center;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);}
+.water-quickadd-lbl{font-size:11px;color:var(--muted);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.05em;flex:1;}
+.water-quickadd-row .water-add{flex:none;}
+.week-summary-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);}
+.week-summary-lbl{font-size:11px;color:var(--muted);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.05em;flex:none;}
+.week-summary-val{font-size:12.5px;color:var(--paper);font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;text-align:right;}
+.strength-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line);}
+.strength-row:first-child{border-top:none;padding-top:0;}
+.strength-name{font-size:13px;color:var(--paper);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.strength-val{font-size:13px;color:var(--blue-tint);flex:none;}
+.goal-row{margin-bottom:12px;}
+.goal-row:last-child{margin-bottom:0;}
+.goal-row-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:12.5px;color:var(--paper);margin-bottom:5px;}
+.goal-row-top .mono{color:var(--muted);font-size:12px;}
+.mg-dot{width:8px;height:8px;border-radius:50%;flex:none;}
+.mg-row{display:flex;align-items:center;gap:8px;margin-bottom:9px;}
+.mg-row:last-child{margin-bottom:0;}
+.mg-cat{width:74px;flex:none;font-size:11.5px;color:var(--muted-2);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mg-val{flex:none;text-align:right;font-size:12px;color:var(--paper);white-space:nowrap;}
+.mg-delta{font-size:11px;}
+.mg-delta.up{color:var(--green);}
+.mg-delta.down{color:var(--muted);}
+.gauge-wrap{flex:1;display:flex;flex-direction:column;align-items:center;position:relative;}
+.gauge-num{position:absolute;top:50%;left:50%;transform:translate(-50%,-42%);text-align:center;}
+.gauge-num .val{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:20px;font-weight:600;}
+.gauge-num .lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-top:1px;}
+.gauge-cap{margin-top:2px;font-size:10.5px;color:var(--muted);text-align:center;font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:0.05em;}
+
+/* ---------- Form elements ---------- */
+.field{margin-bottom:12px;}
+.field label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:0.04em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+.input, select.input, textarea.input{
+  width:100%;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
+  padding:10px 12px;color:var(--paper);font-size:14.5px;
+}
+textarea.input{resize:vertical;min-height:70px;}
+.row{display:flex;gap:10px;}
+.row > *{flex:1;}
+.seg{display:flex;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:3px;}
+.seg button{flex:1;background:none;border:none;color:var(--muted);padding:7px 6px;border-radius:7px;font-size:12.5px;font-weight:600;}
+.seg button.active{background:var(--surface-3);color:var(--paper);}
+
+/* ---------- Lists / rows ---------- */
+.list-row{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:12px 2px;border-bottom:1px solid var(--line);
+  transition:background-color .1s;
+}
+.list-row:last-child{border-bottom:none;}
+/* Tappable rows (food picker, history, saved meals, recent activity, etc.)
+   had no touch feedback at all — the row just sat there until the next
+   screen appeared, which is a big part of what makes a UI feel like a
+   website instead of an app. */
+.list-row:active{background-color:var(--surface-2);}
+.list-row .lr-main{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.list-row .lr-title{font-size:14.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.list-row .lr-sub{font-size:12px;color:var(--muted);}
+.chip{
+  display:inline-flex;align-items:center;font-size:10.5px;padding:3px 8px;border-radius:20px;
+  background:var(--surface-3);color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;
+}
+.chip.warmup{color:var(--muted);}
+.chip.failure{color:var(--red);background:rgba(214,41,59,0.12);}
+/* V31.1: darkened text color (#A25D17, ~5.1:1 on its own tint), same
+   reasoning as .badge-active above -- var(--ember) itself (#D97C1F) only
+   hit 2.49:1 as text on this background. --ember is untouched everywhere
+   else (fill colors, icon strokes, dark-surface text already had contrast
+   to spare). */
+.chip.drop{color:#A25D17;background:rgba(217,124,31,0.12);}
+/* V32: same darkened-text-on-tint treatment as .badge-active/.pct-badge.up
+   above (var(--green) alone was 2.82:1 on this fill, below WCAG AA) --
+   applied here too since this class is now actually rendered (History PR
+   indicator) rather than only declared. */
+.chip.pr{color:#11823B;background:rgba(22,163,74,0.12);}
+
+/* progress bars */
+.pbar{height:8px;border-radius:6px;background:var(--surface-3);overflow:hidden;}
+.pbar > div{height:100%;border-radius:6px;transition:width .3s;}
+.pbar.blue > div{background:var(--blue);}
+.pbar.ember > div{background:var(--ember);}
+.pbar.green > div{background:var(--green);}
+.pbar.red > div{background:var(--red);}
+
+/* macro rings mini */
+.macro-line{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
+.macro-line .m-lbl{width:56px;font-size:11.5px;color:var(--muted);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:0.03em;}
+.macro-line .pbar{flex:1;}
+.macro-line .m-val{width:78px;text-align:right;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12px;color:var(--paper);}
+
+/* Empty states */
+.empty{
+  text-align:center;padding:32px 14px;color:var(--muted);
+}
+.empty svg{width:38px;height:38px;stroke:var(--faint);fill:none;stroke-width:1.3;margin-bottom:10px;}
+.empty .e-title{font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:0.03em;color:var(--paper);font-size:14px;margin-bottom:4px;}
+.empty .e-sub{font-size:12.5px;}
+
+/* Modal */
+.modal-backdrop{
+  position:fixed;inset:0;background:rgba(8,10,13,0.72);z-index:100;
+  display:flex;align-items:flex-end;justify-content:center;
+}
+.modal-backdrop.center{align-items:center;padding:20px;}
+.modal{
+  background:var(--surface);color:var(--paper);border:1px solid var(--line);border-top:1px solid var(--line);border-radius:22px 22px 0 0;
+  width:100%;max-width:520px;max-height:88vh;overflow-y:auto;padding:10px 18px calc(20px + env(safe-area-inset-bottom));
+  animation:slideup .24s cubic-bezier(.22,.9,.3,1);position:relative;
+  box-shadow:0 -8px 30px rgba(0,16,32,0.12);
+}
+.modal::before{content:'';display:block;width:38px;height:4px;border-radius:3px;background:var(--line-2);margin:0 auto 14px;}
+.modal-backdrop.center .modal::before{display:none;}
+.modal-backdrop.center .modal{border-radius:16px;max-height:80vh;}
+@keyframes slideup{from{transform:translateY(24px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+.modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.modal-head h3{font-size:17px;}
+
+/* Tables */
+.dtable{width:100%;border-collapse:collapse;font-size:13px;}
+.dtable th{text-align:left;color:var(--muted);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;font-size:10.5px;letter-spacing:0.04em;padding:6px 4px;border-bottom:1px solid var(--line);}
+.dtable td{padding:8px 4px;border-bottom:1px solid var(--line);font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;}
+.dtable tr:last-child td{border-bottom:none;}
+
+.range-row{display:flex;gap:6px;margin:2px 0 12px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.range-chip{flex:none;background:var(--surface-2);border:1px solid var(--line);border-radius:20px;padding:6px 13px;font-size:11px;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;color:var(--muted);letter-spacing:.03em;}
+.range-chip.active{background:var(--blue);border-color:var(--blue);color:#fff;}
+.quicklog-row{display:flex;gap:6px;margin:0 0 12px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.quicklog-chip{min-height:38px;color:var(--blue-tint);border-color:var(--blue-line);}
+
+.ms-expand{width:30px;height:30px;flex:none;}
+.ms-expand svg{transition:transform .15s ease;}
+.ms-expand[aria-expanded="true"] svg{transform:rotate(180deg);}
+.ms-detail-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px 18px;padding:8px 4px 10px;}
+.ms-detail-grid>div{display:flex;justify-content:space-between;font-size:12.5px;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;}
+.ms-detail-lbl{color:var(--muted);}
+.ms-detail-val{color:var(--paper);}
+
+/* Toast */
+#toast{
+  position:fixed;left:50%;bottom:168px;transform:translateX(-50%) translateY(20px);
+  background:var(--surface-3);border:1px solid var(--line);color:var(--paper);
+  padding:10px 16px;border-radius:10px;font-size:13px;z-index:200;opacity:0;pointer-events:none;
+  transition:all .25s;box-shadow:0 8px 20px rgba(0,0,0,0.35);
+  max-width:calc(100% - 32px);text-align:center;line-height:1.4;
+  display:flex;align-items:center;justify-content:center;gap:12px;
+}
+#toast.pr{border-color:var(--green);background:rgba(22,163,74,0.14);}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto;}
+#toast .toast-action{
+  flex:none;background:none;border:none;color:var(--blue-tint);font-weight:700;
+  font-size:13px;text-transform:uppercase;letter-spacing:.03em;padding:2px;white-space:nowrap;
+}
+
+/* Rest timer floats outside #screen-workout (fixed to #restTimerRoot at the
+   body level) so it can't inherit .workout-dark via cascade -- it only ever
+   appears during an active session, so its dark-navy colors are hardcoded
+   to match rather than themed. */
+.rest-timer{
+  position:fixed;left:50%;bottom:86px;transform:translateX(-50%);width:calc(100% - 24px);max-width:496px;
+  background:#0C1E33;border:1px solid #2F6FAE;border-radius:15px;padding:11px 12px;
+  display:flex;align-items:center;gap:11px;z-index:60;box-shadow:0 12px 30px rgba(0,0,0,.5);
+  animation:e1in .22s ease-out;
+}
+.rest-timer .rt-ring{position:relative;width:44px;height:44px;flex:none;}
+.rest-timer .rt-ring svg{transform:rotate(-90deg);}
+.rest-timer .rt-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12.5px;font-weight:600;color:#6CB4FF;}
+.rest-timer .rt-info{flex:1;min-width:0;}
+.rest-timer .rt-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:0.09em;color:#6CB4FF;text-transform:uppercase;}
+.rest-timer .rt-next{font-size:11.5px;color:#8FA6BC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.rest-timer .rt-plus{flex:none;background:#173355;border:1px solid #2F6FAE;color:#6CB4FF;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12px;padding:9px 10px;border-radius:9px;min-height:38px;}
+.rest-timer .rt-skip{flex:none;background:var(--blue);border:none;color:#fff;font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;padding:10px 12px;border-radius:9px;min-height:38px;}
+@keyframes e1in{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+
+/* graph */
+.graph-wrap{width:100%;}
+.graph-wrap svg{width:100%;display:block;}
+.graph-legend{display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:6px;}
+.graph-legend span{display:inline-flex;align-items:center;gap:5px;}
+.graph-legend i{width:8px;height:8px;border-radius:50%;display:inline-block;}
+
+/* V26: exercise-block / set-row state -- exactly one exercise block and one
+   set row are ever marked .current (the next thing to do); .done rows
+   recede slightly once checked off. Kept to color/opacity/a chip toggle,
+   no layout shift, so it stays cheap to update on every check-toggle. */
+.exercise-block.current{border-color:var(--blue-line);box-shadow:inset 3px 0 0 var(--blue);}
+.chip.current-chip{color:var(--blue-tint);background:rgba(32,128,240,0.16);margin-left:2px;}
+.chip.current-chip[hidden]{display:none;} /* .chip sets display:inline-flex at equal specificity to the UA [hidden] rule, so this must be explicit */
+
+/* exercise set row in active session */
+.set-row{display:flex;align-items:center;gap:6px;padding:6px 0;border-radius:10px;transition:background-color .15s ease,opacity .15s ease;}
+.set-row.current{margin:0 -15px;padding:6px 15px;background:rgba(32,128,240,0.08);}
+.set-row.current .set-idx{color:var(--blue-tint);font-weight:700;}
+.set-row.done{opacity:.68;}
+.set-row .set-idx{width:20px;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;color:var(--faint-2);font-size:12px;text-align:center;flex-shrink:0;}
+.set-row input{
+  background:var(--surface-2);border:1px solid var(--line-2);border-radius:10px;color:var(--paper);
+  text-align:center;padding:12px 2px;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:16px;width:100%;
+  min-height:46px;
+}
+.set-row input:focus-visible{border-color:var(--blue);outline:none;}
+/* V29: the current set's weight/reps fields are wrapped in a compact
+   stepper -- smaller than the general-purpose .stepper-btn (which is sized
+   for full-screen contexts) so it still fits the dense row without pushing
+   other controls off-row, but stays within the 30-38px range already
+   established elsewhere on this screen for compact icon controls. */
+/* The current row swaps two plain inputs for two steppers (4 extra
+   buttons) while keeping the same tag/check/delete controls -- too much
+   for one dense line at narrow widths, so this row alone is allowed to
+   wrap: steppers claim a sensible minimum width and the trailing controls
+   drop to a second line together rather than squeezing the number input
+   down to unreadable/invisible (the bug this replaces). */
+.set-row.current{flex-wrap:wrap;row-gap:8px;}
+.set-row .set-stepper{flex:1 1 128px;min-width:128px;display:flex;align-items:center;gap:4px;}
+.set-row .set-stepper input{width:100%;min-width:40px;padding:10px 2px;font-size:15px;}
+.set-row .set-stepper .stepper-btn{width:28px;height:38px;flex:none;border-radius:8px;font-size:15px;min-height:0;}
+/* Tag/check/delete become their own right-aligned group on the wrapped
+   row, instead of trailing off wherever they happen to land. */
+.set-row.current .set-tagbtn{margin-left:auto;}
+.set-row .set-check{
+  width:42px;height:46px;border-radius:10px;border:1px solid var(--line-2);background:var(--surface-2);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.set-row .set-check.done{background:var(--green);border-color:var(--green);}
+.set-row .set-check svg{width:18px;height:18px;stroke:var(--muted);fill:none;stroke-width:2.8;}
+.set-row .set-check.done svg{stroke:#08130D;}
+.set-row .set-tagbtn{width:34px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted);font-size:9.5px;flex-shrink:0;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+/* Opens the full set-detail modal (LAST TIME / TARGET / TODAY + a larger
+   stepper) for the current set -- the inline row already covers fast
+   logging, this is the "step back and look at just this set" view. */
+.set-row .set-expand{width:30px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--blue-tint);flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+.set-row .rpe-input{flex:none !important;width:38px !important;min-width:38px;font-size:13px !important;padding:12px 0 !important;}
+.set-row .set-del{width:28px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted-2);flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+.set-row .set-del:disabled{opacity:.32;}
+
+.exercise-block{background:var(--surface);border:1px solid var(--line-2);border-radius:17px;padding:0;margin-bottom:12px;overflow:hidden;}
+.exercise-block .ex-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:15px 15px 12px;}
+.exercise-block .ex-head .ex-name{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:19px;line-height:1.1;text-transform:uppercase;letter-spacing:0.02em;}
+.exercise-block .ex-head .ex-tag{font-size:10.5px;color:var(--blue);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;}
+.exercise-block .ex-head-actions{display:flex;gap:4px;flex:none;}
+.exercise-block .ex-act-btn{width:42px;height:42px;}
+@media (max-width:340px){
+  .exercise-block .ex-act-btn{width:38px;height:38px;}
+}
+.ex-target{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:11.5px;color:var(--ember);margin-top:3px;}
+.ex-notes{margin:0 15px 10px;font-size:12.5px;color:var(--muted-2);line-height:1.4;font-style:italic;}
+.ex-lasttime{display:flex;align-items:center;gap:8px;margin:0 15px 11px;background:var(--ink);border:1px solid var(--line);border-radius:10px;padding:9px 11px;}
+.ex-lasttime svg{flex:none;stroke:var(--ember);}
+.ex-lasttime .ll-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:.07em;color:var(--muted-2);text-transform:uppercase;white-space:nowrap;}
+.ex-lasttime .ll-val{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:12.5px;color:var(--paper);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ex-suggest{display:flex;align-items:center;gap:8px;margin:-3px 15px 11px;background:rgba(22,163,74,0.08);border:1px solid rgba(22,163,74,0.35);border-radius:10px;padding:9px 11px;}
+.ex-suggest svg{flex:none;stroke:var(--green);}
+.ex-suggest .ll-lbl{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;letter-spacing:.07em;color:var(--green);text-transform:uppercase;white-space:nowrap;}
+.ex-suggest .ll-val{font-family:'Figtree',sans-serif;font-size:12px;color:var(--paper);white-space:normal;}
+.ex-suggest-continue{background:rgba(32,128,240,0.08);border-color:var(--blue-line);}
+.ex-suggest-continue svg{stroke:var(--blue-tint);}
+.ex-suggest-continue .ll-lbl{color:var(--blue-tint);}
+/* V29: 'up' is green (matches the reference design's positive-progression
+   card); 'continue' is blue (defined above); 'repeat' gets a neutral
+   treatment -- paired with a different icon and label text in every case,
+   so the type is never color-only. */
+.ex-suggest-repeat{background:var(--surface-2);border-color:var(--line-2);}
+.ex-suggest-repeat svg{stroke:var(--muted-2);}
+.ex-suggest-repeat .ll-lbl{color:var(--muted-2);}
+.program-context{display:flex;align-items:center;gap:5px;margin:0 0 10px;font-size:11.5px;color:var(--blue-tint);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;flex-wrap:wrap;}
+.program-context .pc-dot{color:var(--faint);}
+.program-context .pc-name{color:var(--muted);}
+.set-hdr{display:flex;gap:6px;font-size:9.5px;color:var(--faint-2);text-transform:uppercase;letter-spacing:.08em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;padding:0 15px 4px;}
+.set-hdr span{flex:1;text-align:center;}
+.set-hdr span:first-child{flex:none;width:20px;}
+.setsWrap{padding:0 15px 13px;}
+.ex-foot{display:flex;gap:8px;padding:0 15px 15px;}
+
+/* pager row for jumping between exercises in an active session */
+.ex-pager{display:flex;gap:7px;overflow-x:auto;padding:0 2px 12px;}
+.ex-pager button{
+  flex:none;padding:7px 11px;border-radius:9px;font-size:11.5px;font-weight:600;white-space:nowrap;
+  background:var(--surface-2);color:var(--muted);border:1px solid var(--line-2);display:flex;align-items:center;gap:6px;
+}
+.ex-pager button.cur{background:var(--blue-dim);color:var(--blue-tint);border-color:var(--blue-line);}
+.ex-pager button .pn{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:10px;opacity:.75;}
+.ex-pager button svg{stroke:var(--green);}
+
+/* session summary card during active workout */
+.session-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:13px 14px;margin-top:14px;}
+.session-card .ses-stats{display:flex;gap:16px;}
+.session-card .ses-stats .v{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:16px;font-weight:600;}
+.session-card .ses-stats .l{font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:9.5px;letter-spacing:.07em;color:var(--faint-2);text-transform:uppercase;margin-top:2px;}
+.session-card .ses-bar{height:6px;border-radius:4px;background:var(--surface-3);margin-top:12px;overflow:hidden;}
+.session-card .ses-bar>div{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--blue),var(--green));transition:width .35s;}
+
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.stat-box{background:var(--surface-2);border:1px solid var(--line);border-radius:11px;padding:12px;}
+.stat-box .sv{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:20px;font-weight:600;}
+.stat-box .sl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-top:2px;}
+
+.search-bar{position:relative;margin-bottom:10px;}
+.search-bar input{padding-left:36px;}
+.search-bar svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:16px;height:16px;stroke:var(--muted);fill:none;stroke-width:2;}
+
+.filter-scroll{display:flex;gap:7px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;}
+.filter-chip{
+  flex-shrink:0;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);
+  padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap;
+}
+.filter-chip.active{background:var(--ink);color:#EAF2FA;border-color:var(--ink);}
+
+.pill-row{display:flex;gap:7px;margin-bottom:12px;}
+.pill-row .btn{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:11px 4px;color:var(--paper);font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;letter-spacing:.06em;text-transform:uppercase;}
+
+.food-badge{flex:none;font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:8.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--blue-tint);background:var(--blue-dim);padding:3px 6px;border-radius:5px;}
+.fav-star{flex:none;background:none;border:none;font-size:20px;line-height:1;color:var(--faint);padding:4px 2px;min-width:32px;min-height:32px;}
+.fav-star.on{color:var(--ember);}
+
+.day-strip{display:flex;gap:6px;margin-bottom:14px;}
+.day-pill{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 2px;text-align:center;}
+.day-pill .dp-d{font-size:9.5px;color:var(--muted);text-transform:uppercase;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+.day-pill .dp-n{font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;font-size:13px;margin-top:2px;}
+.day-pill.today{border-color:var(--blue);}
+.day-pill.logged .dp-n{color:var(--green);}
+
+hr.hairline{border:none;border-top:1px solid var(--line);margin:14px 0;}
+.swipe-del{color:var(--red);background:none;border:none;font-size:12px;font-weight:600;}
+
+/* ---------- Onboarding overlay ---------- */
+.onboard-overlay{
+  position:fixed;inset:0;z-index:500;background:var(--ink);
+  display:flex;flex-direction:column;max-width:520px;margin:0 auto;
+}
+.onboard-body{flex:1;overflow-y:auto;padding:32px 22px 20px;display:flex;flex-direction:column;justify-content:center;}
+.onboard-steps{display:flex;gap:6px;padding:18px 22px 0;}
+.onboard-steps span{flex:1;height:4px;border-radius:3px;background:var(--surface-3);}
+.onboard-steps span.done{background:var(--blue);}
+.onboard-icon{width:56px;height:56px;border-radius:16px;background:var(--surface-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;margin-bottom:18px;}
+.onboard-icon svg{width:28px;height:28px;stroke:var(--blue);fill:none;stroke-width:1.8;}
+.onboard-foot{padding:16px 22px calc(16px + env(safe-area-inset-bottom));}

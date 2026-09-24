@@ -1,0 +1,5847 @@
+/* =========================================================
+   E1FITNESS — core utilities
+   ========================================================= */
+const $ = (sel, root=document) => root.querySelector(sel);
+const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
+// Local-date helper: NEVER use toISOString() for "today" — that converts to UTC and can
+// silently roll the date backward/forward near midnight depending on the device's timezone.
+// This always reflects the device's local calendar date.
+function localISODate(d=new Date()){
+  const y = d.getFullYear(), m = (d.getMonth()+1).toString().padStart(2,'0'), day = d.getDate().toString().padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+const todayISO = () => localISODate(new Date());
+const clamp = (n,a,b) => Math.max(a, Math.min(b, n));
+/* Parses a form field's raw string as a number, but keeps the existing value
+   when the field is blank/unparseable — unlike `parseFloat(x)||keep`, this
+   does NOT fall back when the user explicitly typed a legitimate 0 (BUG B:
+   `0 || default` incorrectly treats a real zero as "unset"). */
+function parsedOrKeep(raw, keep){
+  if(raw==null || raw===''){ return keep; }
+  const n = parseFloat(raw);
+  return isNaN(n) ? keep : n;
+}
+/* Shared range rules for nutrition goal targets — used by the Goals screen's
+   save handler and by backup-import validation, so the two can't drift
+   apart. Assumes the value is already a finite number. Returns an error
+   message string, or null if the value is fine. */
+const GOAL_FIELD_LABELS = {calories:'Calories', protein:'Protein', carbs:'Carbs', fat:'Fat', fiber:'Fiber', sodium:'Sodium', water:'Water'};
+function goalFieldError(key, value){
+  const label = GOAL_FIELD_LABELS[key] || key;
+  if(key==='calories') return value>0 ? null : 'Calories must be greater than 0.';
+  return value>=0 ? null : `${label} can't be negative.`;
+}
+function fmt1(n){ return (Math.round(n*10)/10).toString(); }
+function fmtInt(n){ return Math.round(n).toString(); }
+function fmtDuration(totalSec){
+  const m = Math.floor(totalSec/60), s = Math.round(totalSec%60);
+  return m+':'+s.toString().padStart(2,'0');
+}
+
+// opts.action = {label, onClick} shows a tappable action (e.g. "Undo") inside
+// the toast itself. Built with textContent/createElement rather than
+// interpolating into innerHTML, so a message built from user-entered text
+// (food names, etc. — many callers do this) can never be treated as markup.
+function toast(msg, opts={}){
+  const t = $('#toast');
+  t.classList.toggle('pr', !!opts.pr);
+  t.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  t.appendChild(span);
+  if(opts.action){
+    const btn = document.createElement('button');
+    btn.className = 'toast-action';
+    btn.textContent = opts.action.label;
+    btn.addEventListener('click', ()=>{
+      clearTimeout(toast._t);
+      t.classList.remove('show');
+      opts.action.onClick();
+    });
+    t.appendChild(btn);
+  }
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=> t.classList.remove('show'), opts.action ? 5000 : (opts.pr ? 3200 : 2200));
+}
+
+function escapeHtml(s){
+  if(s===undefined || s===null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function dateLabel(iso){
+  const d = new Date(iso+'T00:00:00');
+  const today = todayISO();
+  const yestDate = new Date(); yestDate.setDate(yestDate.getDate()-1);
+  const yest = localISODate(yestDate);
+  if(iso===today) return 'Today';
+  if(iso===yest) return 'Yesterday';
+  return d.toLocaleDateString(undefined,{weekday:'short', month:'short', day:'numeric'});
+}
+
+/* ---------------- Modal helpers ---------------- */
+// V31.1: per-modal-id record of the element focus should return to on close
+// (whatever was focused right before openModal() ran -- almost always the
+// button that triggered it), keyed the same way _modalReturnFocus is.
+const _modalReturnFocus = {};
+function focusableEls(container){
+  return Array.from(container.querySelectorAll('button, a[href], input, select, textarea, [tabindex]'))
+    .filter(el=> !el.disabled && el.tabIndex!==-1 && el.offsetParent!==null);
+}
+function openModal(innerHtml, {center=false, id='m'}={}){
+  const root = $('#modalRoot');
+  const back = document.createElement('div');
+  back.className = 'modal-backdrop' + (center?' center':'');
+  back.id = 'backdrop-'+id;
+  back.innerHTML = `<div class="modal">${innerHtml}</div>`;
+  // Every modal template reuses id="mClose" for its ✕ button, and some flows
+  // (e.g. Settings -> "Erase All Data", or a failed import while Settings is
+  // still open) leave an earlier modal in the DOM underneath a new one. A
+  // plain document-wide $('#mClose').addEventListener(...) in the caller can
+  // then bind to the OLDER modal's (now-covered, unreachable) close button
+  // instead of this one, leaving the visible ✕ dead. Handling the close
+  // click here via delegation on THIS backdrop guarantees it only ever
+  // reacts to a click on ITS OWN ✕ (or its own empty backdrop area),
+  // regardless of what any other open modal's elements are also called.
+  back.addEventListener('click', (e)=>{ if(e.target===back || e.target.closest('#mClose')) closeModal(id); });
+  // V31.1: Escape closes, and Tab/Shift+Tab wrap within the modal instead of
+  // escaping to whatever's underneath -- a lightweight trap (no framework),
+  // scoped to this one backdrop so nested/stacked modals each keep their
+  // own. Both keys only ever matter while focus is inside `back` in the
+  // first place, since that's the only place this listener can fire from.
+  back.addEventListener('keydown', (e)=>{
+    if(e.key==='Escape'){ e.stopPropagation(); closeModal(id); return; }
+    if(e.key==='Tab'){
+      const modalEl = $('.modal', back);
+      const list = focusableEls(modalEl);
+      if(list.length===0) return;
+      const first = list[0], last = list[list.length-1];
+      if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+      else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+    }
+  });
+  _modalReturnFocus[id] = document.activeElement;
+  root.appendChild(back);
+  // Move focus into the modal on open -- previously it stayed on the
+  // trigger button behind an now-covering modal, so a keyboard user had to
+  // tab through the rest of the page (modalRoot is last in the DOM) before
+  // ever reaching the modal's own controls.
+  const modalEl = $('.modal', back);
+  const first = focusableEls(modalEl)[0];
+  if(first) first.focus();
+  else { modalEl.setAttribute('tabindex','-1'); modalEl.focus(); }
+  return back;
+}
+function closeModal(id='m'){
+  const el = $('#backdrop-'+id);
+  if(el) el.remove();
+  const returnEl = _modalReturnFocus[id];
+  delete _modalReturnFocus[id];
+  if(returnEl && document.body.contains(returnEl) && typeof returnEl.focus==='function') returnEl.focus();
+}
+function closeAllModals(){ $('#modalRoot').innerHTML=''; }
+
+/* =========================================================
+   Persistence
+   ========================================================= */
+const STORE_KEY = 'e1fitness_db_v1';
+// Key a corrupted raw save is preserved under so it's never lost, even
+// though the app can no longer read it. Only written once per corruption
+// event (never overwritten by a later one) so an earlier unrecovered save
+// can't be clobbered by a second failure. Declared up here (not next to
+// handleCorruptedStore below) because load() runs immediately at script
+// load time via `let DB = load()`, before execution ever reaches that
+// function's textual position — a `const` declared there would still be
+// in its temporal dead zone when load() needs it.
+const RECOVERY_KEY = STORE_KEY + '_corrupted_backup';
+
+// Same reasoning as RECOVERY_KEY above: load() calls validateDB() (added in
+// V25 as a startup safety net) synchronously as part of `let DB = load()`,
+// and validateDBInner() reads this constant. Left at its original spot
+// further down, it was in the TDZ on every single normal boot with a
+// non-empty exercise list -- i.e. every real user, every launch -- which
+// made validateDB() throw, get caught by its own internal try/catch, and
+// return a fail-closed "unexpected internal structure" result. That, in
+// turn, made load() show the "Some saved data looks unusual" toast on
+// every normal launch: a false positive on 100% of real installs, found
+// while testing V27 against a fixture with actual exercises for the first
+// time (every prior test fixture for this path happened to use an empty
+// exercises array, which never reaches the line that needs this).
+const VALID_EXERCISE_TYPES = ['weight_reps','bodyweight','assisted','duration','cardio'];
+
+/* Bumped whenever the DB shape changes in a way migrate() needs to handle.
+   Never reset the database to bump this — migrate() must transform old data
+   in place so nothing the user saved is ever lost. */
+const SCHEMA_VERSION = 2;
+
+function defaultDB(){
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    settings:{
+      units:'lbs', // 'lbs' | 'kg'
+      netCarbMode:false,
+      restDefault:90,
+      showRPE:false, // RPE/RIR logging is opt-in — off by default so it never clutters set entry
+      onboarded:false, // flips true once the first-launch onboarding flow is completed
+      connectedApps:{ appleHealth:false, wearOS:false, googleFit:false, fitbit:false, garmin:false, grocery:false },
+      goals:{ calories:2200, protein:150, carbs:230, fat:70, fiber:30, sodium:2300, water:8 },
+      profile:{ heightCm:null, weightLbs:null, age:null, sex:null, activityLevel:1.375, goalWeightLbs:null, goalType:'maintain', intensity:'normal' },
+      lastSavedAt:null,   // last time the DB was written to localStorage (every save())
+      lastExportedAt:null, // last time the user actually downloaded a backup file
+      // V28: which program (if any) the user is currently following.
+      // {programId} only -- current week/workout/phase/completion % are all
+      // *derived* from DB.sessions (see programPosition()), never stored
+      // here, so there's nothing that can drift out of sync with reality or
+      // get silently rewritten. null means "not following a program", the
+      // default and fully backward-compatible state for every existing user.
+      activeProgram:null
+    },
+    exercises:[], // seeded below
+    routines:[],
+    sessions:[], // completed workout logs
+    activeSession:null,
+    foods:[], // food database (custom + seed)
+    foodLogs:[], // {id,date,meal,foodId,amountType,amount}
+    waterLogs:{}, // date -> count (cups)
+    activityLogs:[], // {id,date,type,label,calories,minutes}
+    meals:[], // saved meals/recipes: {id,name,items:[{foodId,servings}]}
+    mealPlan:{}, // "date|slot" -> mealId or foodLogEntry ref (simple: date->slot->mealId)
+    measurements:[], // {id,date,weight,bodyFat,neck,chest,waist,hips,thigh,arm}
+    // V28: optional structured training programs, built entirely on top of
+    // existing routines -- a program never duplicates or owns exercise/set
+    // data, it only references routine ids. Empty by default; a user who
+    // never creates one sees no behavior change anywhere in the app.
+    // {id, name, description, weeks:[{phase:string|null, routineIds:[id,...]}]}
+    programs:[]
+  };
+}
+
+// Set by load() when the stored save couldn't be parsed/read at all (real
+// corruption) vs. parsed fine but validateDB() flagged a structural problem.
+// Checked once by INIT below to show the appropriate warning — never
+// mutated anywhere else.
+let DB_LOAD_CORRUPTED = false;
+let DB_VALIDATION_WARNING = null;
+let DB = load();
+
+/* Transforms a loaded DB in place from whatever schemaVersion it was saved
+   under up to SCHEMA_VERSION. Every step only adds/backfills fields — it
+   never deletes user data (exercises, routines, sessions, nutrition
+   history, measurements, photos, settings all survive untouched). */
+function migrate(db){
+  if(db.schemaVersion==null) db.schemaVersion = 1; // pre-versioning saves
+  if(db.schemaVersion < 2){
+    // v1 -> v2: routine exercises gain a real set/rep/weight/rest/RPE prescription
+    // (BUG A) instead of implicitly meaning "one set"; rename the misleading
+    // lastBackup field (BUG E) since it recorded the last *save*, not a backup/export.
+    (db.routines||[]).forEach(r=> (r.groups||[]).forEach(g=> g.forEach(item=> migrateRoutineItem(item, (db.settings && db.settings.restDefault!=null) ? db.settings.restDefault : 90))));
+    if(db.settings){
+      if(db.settings.lastSavedAt===undefined) db.settings.lastSavedAt = db.settings.lastBackup ?? null;
+      if(db.settings.lastExportedAt===undefined) db.settings.lastExportedAt = null;
+      delete db.settings.lastBackup;
+      if(db.settings.showRPE===undefined) db.settings.showRPE = false;
+    }
+    db.schemaVersion = 2;
+  }
+  return db;
+}
+
+/* Data-integrity check reused for two purposes: (1) gating backup imports
+   (BUG D) so a malformed/corrupt file can never overwrite good data, and
+   (2) an optional developer diagnostic (see runDiagnostics()) — this never
+   runs automatically against the live DB and never surfaces in the normal
+   UI. `errors` are things that make the data unsafe to load (blocks import);
+   `warnings` are things worth knowing about but not fatal (dangling
+   references, duplicate barcodes) — surfaced in the console, not the UI. */
+/* Returns v if it's a real array, otherwise null (missing/undefined is
+   treated as "not present" -> [], but a WRONG type, e.g. a string or object
+   where an array was expected, is real corruption and must be reported).
+   Every nested "list-shaped" field below is read through this — never a
+   bare (x||[]) — so a malformed shape can never reach a bare .forEach()
+   call and throw from inside the validator itself. */
+function asList(v){
+  if(v==null) return [];
+  return Array.isArray(v) ? v : null;
+}
+
+function validateDB(data){
+  const errors = [], warnings = [];
+  try{
+    return validateDBInner(data, errors, warnings);
+  }catch(e){
+    // Defense in depth: validateDBInner is written to never throw, but if an
+    // unanticipated shape slips through, fail CLOSED (reject the import)
+    // rather than let an exception escape into the caller and abort the
+    // whole import flow uncleanly.
+    console.warn('validateDB: unexpected error while validating', e);
+    return {valid:false, errors:['This backup has an unexpected internal structure and could not be safely validated.'], warnings:[]};
+  }
+}
+
+function validateDBInner(data, errors, warnings){
+  if(!data || typeof data!=='object' || Array.isArray(data)){
+    errors.push('File is not a valid E1FITNESS backup (not a JSON object).');
+    return {valid:false, errors, warnings};
+  }
+  const REQUIRED_ARRAYS = ['exercises','routines','sessions','foods','foodLogs','activityLogs','meals','measurements'];
+  REQUIRED_ARRAYS.forEach(k=>{ if(!Array.isArray(data[k])) errors.push(`Missing or invalid "${k}" list.`); });
+  if(!data.settings || typeof data.settings!=='object' || Array.isArray(data.settings)) errors.push('Missing or invalid "settings".');
+  if(data.waterLogs!=null && (typeof data.waterLogs!=='object' || Array.isArray(data.waterLogs))) errors.push('Invalid "waterLogs".');
+  if(data.mealPlan!=null && (typeof data.mealPlan!=='object' || Array.isArray(data.mealPlan))) errors.push('Invalid "mealPlan".');
+  if(data.activeSession!=null && (typeof data.activeSession!=='object' || Array.isArray(data.activeSession))) errors.push('Invalid "activeSession".');
+  // V28: programs is intentionally NOT in REQUIRED_ARRAYS -- a backup
+  // exported before V28 simply won't have this key at all, and that must
+  // keep importing cleanly (see backfillDefaults). Only checked if present.
+  if(data.programs!=null && !Array.isArray(data.programs)) errors.push('Invalid "programs" list.');
+  if(errors.length) return {valid:false, errors, warnings}; // can't safely inspect further without these
+
+  const isNum = v => typeof v==='number' && Number.isFinite(v); // rejects NaN and ±Infinity
+  const validDate = v => typeof v==='string' && !isNaN(new Date(v+'T00:00:00').getTime());
+
+  const exIds = new Set();
+  data.exercises.forEach((e,i)=>{
+    if(!e || typeof e!=='object' || !e.id){ errors.push(`Exercise #${i} is missing an id.`); return; }
+    if(exIds.has(e.id)) errors.push(`Duplicate exercise id "${e.id}".`);
+    exIds.add(e.id);
+    if(!VALID_EXERCISE_TYPES.includes(e.type)) errors.push(`Exercise "${e.name||e.id}" has an invalid type "${e.type}".`);
+  });
+
+  const foodIds = new Set();
+  const barcodeOwners = new Map();
+  data.foods.forEach((f,i)=>{
+    if(!f || typeof f!=='object' || !f.id){ errors.push(`Food #${i} is missing an id.`); return; }
+    if(foodIds.has(f.id)) errors.push(`Duplicate food id "${f.id}".`);
+    foodIds.add(f.id);
+    ['calories','protein','carbs','fat','fiber','sodium','servingGrams'].forEach(k=>{
+      if(f[k]!=null && !isNum(f[k])) errors.push(`Food "${f.name||f.id}" has a non-numeric ${k}.`);
+    });
+    if(f.barcode){
+      if(barcodeOwners.has(f.barcode)) warnings.push(`Barcode "${f.barcode}" is shared by "${f.name}" and "${barcodeOwners.get(f.barcode)}".`);
+      barcodeOwners.set(f.barcode, f.name);
+    }
+  });
+
+  // Shared shape check for one routine-exercise prescription (used by both
+  // saved routines and, structurally, nothing else — sessions freeze their
+  // own copy of these fields onto each entry, checked separately below).
+  function checkRoutineItem(item, where){
+    if(!item || typeof item!=='object'){ errors.push(`${where} has a malformed exercise entry.`); return; }
+    if(typeof item.exerciseId!=='string' || !item.exerciseId){ errors.push(`${where} has an exercise entry with no exerciseId.`); return; }
+    if(!exIds.has(item.exerciseId)) warnings.push(`${where} references a missing exercise.`);
+    ['targetSets','targetRepsMin','targetRepsMax','targetWeight','restSec','rpeTarget'].forEach(k=>{
+      if(item[k]!=null && !isNum(item[k])) errors.push(`${where} has a non-numeric ${k}.`);
+    });
+    if(item.restSec!=null && isNum(item.restSec) && item.restSec<0) errors.push(`${where} has a negative restSec.`);
+    if(item.targetSets!=null && isNum(item.targetSets) && item.targetSets<0) errors.push(`${where} has a negative targetSets.`);
+  }
+
+  const routineIds = new Set();
+  data.routines.forEach((r,i)=>{
+    if(!r || typeof r!=='object' || !r.id){ errors.push(`Routine #${i} is missing an id.`); return; }
+    if(routineIds.has(r.id)) errors.push(`Duplicate routine id "${r.id}".`);
+    routineIds.add(r.id);
+    const groups = asList(r.groups);
+    if(groups===null){ errors.push(`Routine "${r.name||r.id}" has an invalid exercise-group list.`); return; }
+    groups.forEach((g,gi)=>{
+      const items = asList(g);
+      if(items===null){ errors.push(`Routine "${r.name||r.id}" has a malformed exercise group.`); return; }
+      items.forEach(item=> checkRoutineItem(item, `Routine "${r.name||r.id}" group ${gi+1}`));
+    });
+  });
+
+  // V28: programs only ever reference routines by id -- never own exercise
+  // data -- so validation just needs shape + referential sanity, no deep
+  // per-set checks like sessions/routines above.
+  const programIds = new Set();
+  (data.programs||[]).forEach((p,i)=>{
+    if(!p || typeof p!=='object' || !p.id){ errors.push(`Program #${i} is missing an id.`); return; }
+    if(programIds.has(p.id)) errors.push(`Duplicate program id "${p.id}".`);
+    programIds.add(p.id);
+    if(typeof p.name!=='string' || !p.name) errors.push(`Program #${i} is missing a name.`);
+    const weeks = asList(p.weeks);
+    if(weeks===null){ errors.push(`Program "${p.name||p.id}" has an invalid weeks list.`); return; }
+    weeks.forEach((w,wi)=>{
+      if(!w || typeof w!=='object'){ errors.push(`Program "${p.name||p.id}" week ${wi+1} is malformed.`); return; }
+      if(w.phase!=null && typeof w.phase!=='string') errors.push(`Program "${p.name||p.id}" week ${wi+1} has an invalid phase.`);
+      const routineIdList = asList(w.routineIds);
+      if(routineIdList===null){ errors.push(`Program "${p.name||p.id}" week ${wi+1} has an invalid workout list.`); return; }
+      routineIdList.forEach(rid=>{ if(!routineIds.has(rid)) warnings.push(`Program "${p.name||p.id}" week ${wi+1} references a missing routine.`); });
+    });
+  });
+  if(data.settings && data.settings.activeProgram!=null){
+    const ap = data.settings.activeProgram;
+    if(typeof ap!=='object' || Array.isArray(ap) || typeof ap.programId!=='string') errors.push('Invalid "settings.activeProgram".');
+    else if(!programIds.has(ap.programId)) warnings.push('settings.activeProgram references a missing program.');
+  }
+
+  // Shared shape check for one logged set, valid across every exercise type
+  // (only the fields relevant to that type are ever populated).
+  function checkSet(set, where){
+    if(!set || typeof set!=='object'){ errors.push(`${where} has a malformed set.`); return; }
+    ['weight','reps','assistWeight','durationSec','distance','calories','rpe'].forEach(k=>{
+      if(set[k]!=null && !isNum(set[k])) errors.push(`${where} has a non-numeric ${k} value.`);
+    });
+    if(set.tag!=null && typeof set.tag!=='string') errors.push(`${where} has an invalid tag.`);
+  }
+  // Shared shape check for one session's exercise groups (used by both
+  // completed sessions and the in-progress activeSession).
+  function checkSessionGroups(groups, where){
+    const list = asList(groups);
+    if(list===null){ errors.push(`${where} has an invalid exercise-group list.`); return; }
+    list.forEach((g,gi)=>{
+      const entries = asList(g);
+      if(entries===null){ errors.push(`${where} has a malformed exercise group.`); return; }
+      entries.forEach((entry,ei)=>{
+        if(!entry || typeof entry!=='object'){ errors.push(`${where} group ${gi+1} has a malformed exercise entry.`); return; }
+        const entryWhere = `${where} group ${gi+1} exercise ${ei+1}`;
+        if(!exIds.has(entry.exerciseId)) warnings.push(`${entryWhere} references a missing exercise.`);
+        if(entry.exType && !VALID_EXERCISE_TYPES.includes(entry.exType)) warnings.push(`${entryWhere} has an invalid type "${entry.exType}".`);
+        const sets = asList(entry.sets);
+        if(sets===null){ errors.push(`${entryWhere} has an invalid set list.`); return; }
+        sets.forEach((set,si)=> checkSet(set, `${entryWhere} set ${si+1}`));
+      });
+    });
+  }
+
+  const sessionIds = new Set();
+  data.sessions.forEach((s,i)=>{
+    if(!s || typeof s!=='object' || !s.id){ errors.push(`Session #${i} is missing an id.`); return; }
+    if(sessionIds.has(s.id)) errors.push(`Duplicate session id "${s.id}".`);
+    sessionIds.add(s.id);
+    if(!validDate(s.date)) errors.push(`Session ${s.id} has an invalid date.`);
+    if(s.startedAt!=null && !isNum(s.startedAt)) errors.push(`Session ${s.id} has an invalid startedAt.`);
+    if(s.durationMin!=null && (!isNum(s.durationMin) || s.durationMin<0)) errors.push(`Session ${s.id} has an invalid durationMin.`);
+    checkSessionGroups(s.groups, `Session ${s.id}`);
+  });
+  if(data.activeSession){
+    const as = data.activeSession;
+    if(as.startedAt!=null && !isNum(as.startedAt)) errors.push('Active session has an invalid startedAt.');
+    checkSessionGroups(as.groups, 'Active session');
+  }
+
+  data.foodLogs.forEach((l,i)=>{
+    if(!l || typeof l!=='object' || !l.id){ errors.push(`Food log #${i} is missing an id.`); return; }
+    if(!foodIds.has(l.foodId)) warnings.push(`Food log ${l.id} references a missing food.`);
+    if(l.amount!=null && !isNum(l.amount)) errors.push(`Food log ${l.id} has a non-numeric amount.`);
+    if(!validDate(l.date)) errors.push(`Food log ${l.id} has an invalid date.`);
+  });
+
+  data.activityLogs.forEach((a,i)=>{
+    if(!a || typeof a!=='object' || !a.id){ errors.push(`Activity log #${i} is missing an id.`); return; }
+    if(!validDate(a.date)) errors.push(`Activity log ${a.id} has an invalid date.`);
+    ['minutes','calories'].forEach(k=>{
+      if(a[k]!=null && !isNum(a[k])) errors.push(`Activity log ${a.id} has a non-numeric ${k}.`);
+    });
+  });
+
+  data.measurements.forEach((m,i)=>{
+    if(!m || typeof m!=='object' || !m.id){ errors.push(`Measurement #${i} is missing an id.`); return; }
+    if(!validDate(m.date)) errors.push(`Measurement ${m.id} has an invalid date.`);
+    ['weight','bodyFat','waist','chest','hips','arm','thigh'].forEach(k=>{
+      if(m[k]==null) return;
+      if(!isNum(m[k])) errors.push(`Measurement ${m.id} has a non-numeric ${k}.`);
+      else if(m[k]<0) errors.push(`Measurement ${m.id} has a negative ${k}.`);
+    });
+  });
+
+  // Settings: wrong-typed units/goals/profile numbers would silently produce
+  // NaN throughout the dashboard and nutrition screens (goal bars, calorie
+  // math, unit conversion) rather than failing loudly, so they're validated
+  // explicitly rather than left to "whatever backfillDefaults papers over".
+  const st = data.settings;
+  if(st.units!=null && st.units!=='lbs' && st.units!=='kg') errors.push(`Settings has an invalid units value "${st.units}".`);
+  if(st.restDefault!=null && (!isNum(st.restDefault) || st.restDefault<0)) errors.push('Settings has an invalid restDefault.');
+  if(st.goals!=null){
+    if(typeof st.goals!=='object' || Array.isArray(st.goals)) errors.push('Settings has an invalid goals object.');
+    else ['calories','protein','carbs','fat','fiber','sodium','water'].forEach(k=>{
+      if(st.goals[k]==null) return;
+      if(!isNum(st.goals[k])){ errors.push(`Settings goals.${k} is non-numeric.`); return; }
+      const rangeErr = goalFieldError(k, st.goals[k]);
+      if(rangeErr) errors.push(`Settings goals.${k}: ${rangeErr}`);
+    });
+  }
+  if(st.profile!=null){
+    if(typeof st.profile!=='object' || Array.isArray(st.profile)) errors.push('Settings has an invalid profile object.');
+    else ['heightCm','weightLbs','age','goalWeightLbs','activityLevel'].forEach(k=>{
+      if(st.profile[k]!=null && !isNum(st.profile[k])) errors.push(`Settings profile.${k} is non-numeric.`);
+    });
+  }
+
+  return {valid: errors.length===0, errors, warnings};
+}
+
+/* Developer/diagnostic mode only — call runDiagnostics() from the browser
+   console. Never invoked automatically and never rendered in the normal UI,
+   per the "no technical clutter" requirement. */
+function runDiagnostics(){
+  const result = validateDB(DB);
+  console.log(`[E1FITNESS diagnostics] ${result.valid?'DB looks structurally sound.':'DB has integrity errors!'}`);
+  if(result.errors.length){ console.group('Errors'); result.errors.forEach(e=>console.error(e)); console.groupEnd(); }
+  if(result.warnings.length){ console.group('Warnings'); result.warnings.forEach(w=>console.warn(w)); console.groupEnd(); }
+  return result;
+}
+
+/* Fills in any field missing from a saved/imported DB with the current
+   default, without touching a single field that's already present. Shared
+   by load() (opening the app) and the backup-import flow, so both go
+   through the exact same upgrade path. */
+function backfillDefaults(parsed){
+  const d = defaultDB();
+  Object.keys(d).forEach(k=>{ if(parsed[k]===undefined) parsed[k]=d[k]; });
+  if(!parsed.settings.connectedApps) parsed.settings.connectedApps = d.settings.connectedApps;
+  if(!parsed.settings.goals) parsed.settings.goals = d.settings.goals;
+  if(!parsed.settings.profile) parsed.settings.profile = d.settings.profile;
+  if(parsed.settings.activeProgram===undefined) parsed.settings.activeProgram = d.settings.activeProgram;
+  // Backfill any individual fields added to goals/profile since the user's last save,
+  // so upgrading the app never drops a returning user into missing-data states.
+  Object.keys(d.settings.goals).forEach(k=>{ if(parsed.settings.goals[k]===undefined) parsed.settings.goals[k]=d.settings.goals[k]; });
+  Object.keys(d.settings.profile).forEach(k=>{ if(parsed.settings.profile[k]===undefined) parsed.settings.profile[k]=d.settings.profile[k]; });
+  return parsed;
+}
+
+/* Called when the saved DB exists but JSON.parse (or the shape-repair step
+   right after it) throws — i.e. the data is there but unreadable, not a
+   fresh install. Preserves the untouched raw string under RECOVERY_KEY
+   BEFORE anything else touches STORE_KEY, flags DB_LOAD_CORRUPTED so INIT
+   shows a warning instead of silently acting like first launch, then hands
+   back a normal fresh DB so the app itself stays usable. */
+function handleCorruptedStore(raw){
+  try{
+    if(!localStorage.getItem(RECOVERY_KEY)){
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify({preservedAt:new Date().toISOString(), raw}));
+    }
+  }catch(e){ console.warn('Could not preserve corrupted save for recovery', e); }
+  DB_LOAD_CORRUPTED = true;
+  const fresh = defaultDB();
+  seedData(fresh);
+  return fresh;
+}
+
+function load(){
+  try{
+    const raw = localStorage.getItem(STORE_KEY);
+    if(raw){
+      let parsed;
+      try{
+        parsed = backfillDefaults(JSON.parse(raw));
+      }catch(parseErr){
+        console.warn('load: stored data could not be read — preserving it for recovery', parseErr);
+        return handleCorruptedStore(raw);
+      }
+      // Grandfather in any existing save from before onboarding existed — only genuinely
+      // fresh installs (no saved data at all) should ever see the onboarding flow.
+      if(parsed.settings.onboarded===undefined) parsed.settings.onboarded = true;
+      migrate(parsed);
+      // Lightweight safety net (not a hard gate): flag serious structural
+      // problems so INIT can warn the user, but never block or alter a
+      // successful load over them — see validateDB() for what counts.
+      try{
+        const check = validateDB(parsed);
+        if(!check.valid && check.errors.length){
+          console.warn('[E1FITNESS] startup validation found issues in the loaded data:', check.errors);
+          DB_VALIDATION_WARNING = check.errors;
+        }
+      }catch(e){ console.warn('startup validation itself failed, continuing without it', e); }
+      return parsed;
+    }
+  }catch(e){ console.warn('load failed', e); }
+  const fresh = defaultDB();
+  seedData(fresh);
+  return fresh;
+}
+
+let saveTimer=null;
+function save(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=>{
+    try{
+      // Stamp lastSavedAt BEFORE stringifying so the timestamp that gets
+      // written is actually the timestamp of the data being written
+      // (previously this was set after localStorage.setItem, so the saved
+      // JSON never contained its own save time — BUG E).
+      DB.settings.lastSavedAt = new Date().toISOString();
+      localStorage.setItem(STORE_KEY, JSON.stringify(DB));
+    }catch(e){ toast('Storage full — try exporting a backup and clearing older workout history.'); }
+  }, 120);
+}
+
+/* =========================================================
+   Seed data — exercise library & food database
+   ========================================================= */
+function ex(name, category, equipment, type, instructions){
+  return {id:uid(), name, category, equipment, type, instructions, custom:false};
+}
+function seedExercises(){
+  return [
+    ex('Barbell Back Squat','Legs','Barbell','weight_reps','Bar rests on upper traps. Feet shoulder width. Break at hips and knees together, descend until thighs pass parallel, drive up through mid-foot.'),
+    ex('Barbell Bench Press','Chest','Barbell','weight_reps','Retract shoulder blades, plant feet, lower bar to mid-chest with control, press up and slightly back over shoulders.'),
+    ex('Conventional Deadlift','Back','Barbell','weight_reps','Bar over mid-foot, hinge to grip, flat back, drive through the floor and stand tall, hips and shoulders rising together.'),
+    ex('Overhead Press','Shoulders','Barbell','weight_reps','Bar at collarbone, brace core, press directly overhead, finish with bar over mid-foot and biceps by ears.'),
+    ex('Barbell Row','Back','Barbell','weight_reps','Hinge to ~45°, pull bar to lower ribcage, squeeze shoulder blades, lower under control.'),
+    ex('Front Squat','Legs','Barbell','weight_reps','Bar rests on front delts, elbows high, squat down keeping torso upright, drive up through heels.'),
+    ex('Romanian Deadlift','Legs','Barbell','weight_reps','Soft knees, push hips back keeping bar close to legs, lower until hamstrings stretch, drive hips forward to stand.'),
+    ex('Incline Bench Press','Chest','Barbell','weight_reps','Bench at 30-45°, lower bar to upper chest, press up and slightly back.'),
+    ex('Hip Thrust','Legs','Barbell','weight_reps','Upper back on bench, bar over hips, drive hips up to full extension, squeeze glutes at top.'),
+    ex('Dumbbell Bench Press','Chest','Dumbbell','weight_reps','Lower dumbbells to chest level with elbows ~45° from torso, press up and together.'),
+    ex('Dumbbell Shoulder Press','Shoulders','Dumbbell','weight_reps','Press dumbbells overhead from shoulder height, avoid excessive arch, control the descent.'),
+    ex('Dumbbell Row','Back','Dumbbell','weight_reps','One knee and hand on bench, pull dumbbell to hip, keep torso still, lower fully.'),
+    ex('Dumbbell Lateral Raise','Shoulders','Dumbbell','weight_reps','Slight bend in elbows, raise dumbbells to shoulder height leading with elbows, lower slowly.'),
+    ex('Dumbbell Curl','Arms','Dumbbell','weight_reps','Elbows pinned to sides, curl dumbbells up without swinging, squeeze at top, lower fully.'),
+    ex('Hammer Curl','Arms','Dumbbell','weight_reps','Neutral grip curl, elbows fixed, control the eccentric.'),
+    ex('Dumbbell Skullcrusher','Arms','Dumbbell','weight_reps','Lying down, lower dumbbells toward temples by bending elbows only, extend back up.'),
+    ex('Bulgarian Split Squat','Legs','Dumbbell','weight_reps','Rear foot elevated, front thigh reaches parallel, drive through front heel to stand.'),
+    ex('Dumbbell Step-Up','Legs','Dumbbell','weight_reps','Step fully onto box, drive through the lead leg, control the descent.'),
+    ex('Incline Dumbbell Curl','Arms','Dumbbell','weight_reps','Seated on incline bench, arms hang below shoulders, curl through full range.'),
+    ex('Cable Lat Pulldown','Back','Cable','weight_reps','Grip bar wide, pull to upper chest driving elbows down, control the return.'),
+    ex('Cable Row','Back','Cable','weight_reps','Sit tall, pull handle to torso squeezing shoulder blades, extend arms fully on return.'),
+    ex('Cable Tricep Pushdown','Arms','Cable','weight_reps','Elbows pinned at sides, extend forearms down fully, control back up.'),
+    ex('Cable Face Pull','Shoulders','Cable','weight_reps','Pull rope to face height, elbows high, externally rotate shoulders at end range.'),
+    ex('Leg Press','Legs','Machine','weight_reps','Feet shoulder width on platform, lower until knees reach ~90°, press through full foot.'),
+    ex('Leg Extension','Legs','Machine','weight_reps','Extend knees fully against pad, pause briefly, lower with control.'),
+    ex('Leg Curl','Legs','Machine','weight_reps','Curl heels toward glutes, squeeze hamstrings, lower slowly.'),
+    ex('Chest Fly Machine','Chest','Machine','weight_reps','Bring handles together in front of chest with slight elbow bend, stretch back slowly.'),
+    ex('Seated Calf Raise','Legs','Machine','weight_reps','Raise heels as high as possible, pause, lower to a full stretch.'),
+    ex('Pull-Up','Back','Bodyweight','bodyweight','Grip bar wider than shoulders, pull chin over bar, lower with control to full arm extension.'),
+    ex('Chin-Up','Back','Bodyweight','bodyweight','Underhand grip, pull chest to bar, lower under control.'),
+    ex('Push-Up','Chest','Bodyweight','bodyweight','Hands under shoulders, body in a straight line, lower chest to floor, press back up.'),
+    ex('Dip','Chest','Bodyweight','bodyweight','Lower body by bending elbows to ~90°, keep slight forward lean for chest, press back up.'),
+    ex('Bodyweight Squat','Legs','Bodyweight','bodyweight','Feet shoulder width, squat to full depth keeping chest up, stand tall.'),
+    ex('Assisted Pull-Up','Back','Machine','assisted','Use the assist machine or band to reduce bodyweight, pull chin over bar with control.'),
+    ex('Assisted Dip','Chest','Machine','assisted','Assist machine supports part of bodyweight, lower to 90° at elbows, press up.'),
+    ex('Hanging Leg Raise','Core','Bodyweight','bodyweight','Hang from bar, raise legs to hip height or higher without swinging, lower with control.'),
+    ex('Plank','Core','Bodyweight','duration','Forearms and toes on floor, body in a straight line, brace core and hold.'),
+    ex('Side Plank','Core','Bodyweight','duration','Stack feet, prop on one forearm, lift hips into a straight line and hold.'),
+    ex('Wall Sit','Legs','Bodyweight','duration','Back against wall, thighs parallel to floor, hold position.'),
+    ex('Dead Hang','Back','Bodyweight','duration','Hang from a pull-up bar with relaxed shoulders, hold for time.'),
+    ex('Cable Crunch','Core','Cable','weight_reps','Kneel below cable, crunch torso down bringing elbows toward thighs, control the return.'),
+    ex('Ab Wheel Rollout','Core','Bodyweight','bodyweight','Roll wheel forward keeping core braced, extend as far as controllable, pull back to start.'),
+    ex('Farmer\'s Carry','Full Body','Dumbbell','duration','Hold heavy dumbbells or kettlebells at sides, walk with tall posture for distance or time.'),
+    ex('Kettlebell Swing','Full Body','Kettlebell','weight_reps','Hinge and snap hips forward to swing bell to chest height, let it float, control descent.'),
+    ex('Treadmill Run','Cardio','Machine','cardio','Maintain steady pace and posture; track distance, duration and rough calories burned.'),
+    ex('Outdoor Run','Cardio','None','cardio','Log distance and duration from your run; pace shown is calculated automatically.'),
+    ex('Stationary Bike','Cardio','Machine','cardio','Maintain cadence, adjust resistance to target zone; track distance/duration.'),
+    ex('Rowing Machine','Cardio','Machine','cardio','Drive with legs first, then lean back and pull, reverse order on the return.'),
+    ex('Stair Climber','Cardio','Machine','cardio','Maintain upright posture, avoid leaning on handles; track duration and floors.'),
+    ex('Jump Rope','Cardio','None','cardio','Light, quick bounces on the balls of your feet; track duration.'),
+
+    // --- CHEST ---
+    ex('Decline Barbell Bench Press','Chest','Barbell','weight_reps','Bench declined ~15-30°, lower bar to lower chest, press up and slightly back, targets lower pecs.'),
+    ex('Decline Dumbbell Bench Press','Chest','Dumbbell','weight_reps','On a decline bench, lower dumbbells to lower chest with control, press up and together.'),
+    ex('Incline Dumbbell Bench Press','Chest','Dumbbell','weight_reps','Bench at 30-45°, lower dumbbells to upper chest, press up and slightly inward.'),
+    ex('Dumbbell Fly','Chest','Dumbbell','weight_reps','Lying flat, arc dumbbells out with slight elbow bend until a stretch is felt across the chest, bring back together.'),
+    ex('Incline Dumbbell Fly','Chest','Dumbbell','weight_reps','On an incline bench, arc dumbbells out and down to a stretch, squeeze back together over the upper chest.'),
+    ex('Cable Crossover','Chest','Cable','weight_reps','Standing between towers, pull handles down and across in an arc, squeeze chest at the finish, control the return.'),
+    ex('Cable Fly, Low-to-High','Chest','Cable','weight_reps','Set pulleys low, sweep handles up and across to shoulder height, squeeze upper chest, return with control.'),
+    ex('Cable Fly, High-to-Low','Chest','Cable','weight_reps','Set pulleys high, sweep handles down and across to hip height, squeeze lower chest, return with control.'),
+    ex('Pec Deck','Chest','Machine','weight_reps','Elbows on pads at chest height, bring arms together in an arc, squeeze briefly, return under control.'),
+    ex('Smith Machine Bench Press','Chest','Smith Machine','weight_reps','Bar locked to vertical rails, lower to mid-chest, press up through a fixed path.'),
+    ex('Machine Chest Press','Chest','Machine','weight_reps','Grip handles at chest height, press forward until arms extend, control the return without locking out hard.'),
+    ex('Incline Machine Chest Press','Chest','Machine','weight_reps','Seated on an inclined press machine, press handles up and forward, control the return to target upper chest.'),
+    ex('Close-Grip Push-Up','Chest','Bodyweight','bodyweight','Hands close together under the chest, lower keeping elbows tucked, press back up — shifts emphasis to triceps and inner chest.'),
+    ex('Incline Push-Up','Chest','Bodyweight','bodyweight','Hands on an elevated surface, body in a straight line, lower chest to the surface, press back up — easier variation targeting lower chest.'),
+    ex('Decline Push-Up','Chest','Bodyweight','bodyweight','Feet elevated on a bench, hands on floor, lower chest toward the floor, press back up — harder variation targeting upper chest.'),
+    ex('Svend Press','Chest','Dumbbell','weight_reps','Press a weight plate between both palms, extend arms straight out at chest height, squeeze the whole time, return.'),
+    ex('Machine Fly (Pec Deck Wide)','Chest','Machine','weight_reps','Grip handles with straight arms, bring hands together in a wide arc at chest height, control the stretch back.'),
+
+    // --- BACK ---
+    ex('Sumo Deadlift','Back','Barbell','weight_reps','Wide stance, toes out, grip inside the knees, drive through the floor keeping chest up and back flat.'),
+    ex('Deficit Deadlift','Back','Barbell','weight_reps','Stand on a small platform to increase range of motion, hinge and pull with a flat back, stand tall.'),
+    ex('Trap Bar Deadlift','Back','Trap Bar','weight_reps','Stand centered inside the trap bar, grip handles, drive through the floor keeping the torso more upright than a straight bar pull.'),
+    ex('Rack Pull','Back','Barbell','weight_reps','Bar set at knee height in a rack, hinge to grip, drive the floor away and lock out hips — partial-range pull for the upper back and grip.'),
+    ex('Pendlay Row','Back','Barbell','weight_reps','Bar starts on the floor each rep, hinge to a flat back, explosively row bar to the lower ribcage, reset dead each rep.'),
+    ex('T-Bar Row','Back','Barbell','weight_reps','Straddle the bar, hinge forward, row the handle to the chest keeping elbows close, lower under control.'),
+    ex('Seal Row','Back','Dumbbell','weight_reps','Lying face-down on a raised bench, row dumbbells straight up to the torso without any body english, lower fully.'),
+    ex('Chest-Supported Row','Back','Machine','weight_reps','Chest braced against the pad, row handles to the torso squeezing shoulder blades, extend arms fully on the return.'),
+    ex('Machine Row','Back','Machine','weight_reps','Seated, chest against the pad, pull handles to the torso, squeeze shoulder blades together, extend fully.'),
+    ex('Wide-Grip Lat Pulldown','Back','Cable','weight_reps','Grip the bar wide, pull down to the upper chest driving elbows down and back, control the return.'),
+    ex('Close-Grip Lat Pulldown','Back','Cable','weight_reps','Narrow or V-handle grip, pull down to the chest keeping elbows close to the body, control the return.'),
+    ex('Neutral-Grip Pulldown','Back','Cable','weight_reps','Neutral-grip handle, pull down to the upper chest, squeeze the lats, control the return.'),
+    ex('Straight-Arm Pulldown','Back','Cable','weight_reps','Arms straight, sweep the bar down from overhead to the thighs using the lats, control the return.'),
+    ex('Barbell Pullover','Back','Barbell','weight_reps','Lying on a bench, lower a barbell behind the head in an arc keeping arms mostly straight, pull back over the chest.'),
+    ex('Dumbbell Pullover','Back','Dumbbell','weight_reps','Lying across a bench, lower a dumbbell behind the head in an arc, pull back over the chest feeling a lat stretch.'),
+    ex('Cable Pullover','Back','Cable','weight_reps','Standing facing away from a high pulley, sweep the bar down and back in an arc using the lats, control the return.'),
+    ex('Muscle-Up','Back','Bodyweight','bodyweight','Explosive pull-up transitioning over the bar into a dip lockout — advanced combined pulling and pressing movement.'),
+    ex('Barbell Shrug','Back','Barbell','weight_reps','Hold a barbell at arm-length, elevate the shoulders straight up toward the ears, pause, lower with control.'),
+    ex('Dumbbell Shrug','Back','Dumbbell','weight_reps','Hold dumbbells at your sides, elevate the shoulders straight up, pause briefly, lower with control.'),
+    ex('Trap Bar Shrug','Back','Trap Bar','weight_reps','Stand inside a loaded trap bar, elevate the shoulders straight up, pause, lower under control.'),
+    ex('Back Extension','Back','Bodyweight','bodyweight','Hips on the pad of a hyperextension bench, lower torso forward with a flat back, raise back to neutral without hyperextending.'),
+    ex('Good Morning','Back','Barbell','weight_reps','Bar on the upper back, soft knees, hinge forward keeping a flat back until torso nears parallel, return to standing.'),
+    ex('Renegade Row','Back','Dumbbell','weight_reps','In a plank on two dumbbells, row one dumbbell to the hip while bracing the core, alternate sides.'),
+    ex('Inverted Row','Back','Bodyweight','bodyweight','Body straight under a fixed bar, pull chest to the bar keeping the body rigid, lower under control.'),
+    ex('Cable Shrug','Back','Cable','weight_reps','Grip a straight-bar cable attachment, elevate the shoulders straight up, pause, lower with control.'),
+
+    // --- SHOULDERS ---
+    ex('Seated Barbell Overhead Press','Shoulders','Barbell','weight_reps','Seated with back supported, press the bar overhead from the collarbone, lower under control.'),
+    ex('Seated Dumbbell Shoulder Press','Shoulders','Dumbbell','weight_reps','Seated with back supported, press dumbbells overhead, avoid excessive arch, control the descent.'),
+    ex('Arnold Press','Shoulders','Dumbbell','weight_reps','Start with palms facing you, rotate and press overhead so palms face forward at the top, reverse on the way down.'),
+    ex('Push Press','Shoulders','Barbell','weight_reps','Dip slightly at the knees, drive the bar overhead using leg drive, lock out arms, lower with control.'),
+    ex('Machine Shoulder Press','Shoulders','Machine','weight_reps','Seated, press handles overhead until arms extend, control the return to shoulder height.'),
+    ex('Landmine Press','Shoulders','Landmine','weight_reps','One end of a barbell anchored in a landmine, press the free end up and forward at an angle, control the return.'),
+    ex('Cable Lateral Raise','Shoulders','Cable','weight_reps','Standing side-on to a low pulley, raise the handle out to shoulder height leading with the elbow, lower slowly.'),
+    ex('Machine Lateral Raise','Shoulders','Machine','weight_reps','Arms against the pads, raise out to shoulder height, pause briefly, lower under control.'),
+    ex('Dumbbell Front Raise','Shoulders','Dumbbell','weight_reps','Raise a dumbbell in each hand straight out in front to shoulder height, lower with control.'),
+    ex('Cable Front Raise','Shoulders','Cable','weight_reps','Standing facing away from a low pulley, raise the handle straight out in front to shoulder height, lower slowly.'),
+    ex('Plate Front Raise','Shoulders','Barbell','weight_reps','Hold a weight plate with both hands, raise straight out in front to shoulder height, lower with control.'),
+    ex('Dumbbell Rear Delt Fly','Shoulders','Dumbbell','weight_reps','Hinge forward, raise dumbbells out to the sides squeezing the rear delts, lower slowly.'),
+    ex('Cable Rear Delt Fly','Shoulders','Cable','weight_reps','Crossed cables at chest height, sweep handles out and back squeezing the rear delts, control the return.'),
+    ex('Reverse Pec Deck','Shoulders','Machine','weight_reps','Facing into the pad, sweep handles out and back squeezing the rear delts, control the return.'),
+    ex('Barbell Upright Row','Shoulders','Barbell','weight_reps','Pull the bar up close to the body to chest height leading with the elbows, lower under control.'),
+    ex('Cable Upright Row','Shoulders','Cable','weight_reps','Pull a cable bar up close to the body leading with the elbows, lower with control.'),
+    ex('Cuban Press','Shoulders','Dumbbell','weight_reps','From a high pull position, rotate into an overhead press lockout, reverse the sequence on the way down — great for shoulder health.'),
+
+    // --- ARMS ---
+    ex('Barbell Curl','Arms','Barbell','weight_reps','Elbows pinned to sides, curl the bar up without swinging, squeeze at the top, lower fully.'),
+    ex('EZ-Bar Curl','Arms','EZ-Bar','weight_reps','Grip the angled bar, curl up keeping elbows fixed, squeeze at the top, lower under control.'),
+    ex('Preacher Curl, Barbell','Arms','Barbell','weight_reps','Arms braced on a preacher pad, curl the bar up, control the stretch on the way down.'),
+    ex('Preacher Curl, Dumbbell','Arms','Dumbbell','weight_reps','Single arm braced on a preacher pad, curl the dumbbell up, control the stretch on the way down.'),
+    ex('Concentration Curl','Arms','Dumbbell','weight_reps','Elbow braced against the inner thigh, curl the dumbbell up with strict form, squeeze at the top.'),
+    ex('Cable Curl','Arms','Cable','weight_reps','Standing at a low pulley, curl the bar up keeping elbows fixed, lower under control.'),
+    ex('Cable Curl, Single Arm','Arms','Cable','weight_reps','Standing at a low pulley, curl one arm up at a time keeping the elbow fixed, lower under control.'),
+    ex('Spider Curl','Arms','EZ-Bar','weight_reps','Chest braced against an incline bench, arms hanging free, curl the bar up strictly, lower fully.'),
+    ex('Drag Curl','Arms','Barbell','weight_reps','Curl the bar up close along the torso, keeping elbows drawn back rather than forward, squeeze at the top.'),
+    ex('21s Bicep Curl','Arms','Barbell','weight_reps','7 partial reps from the bottom to mid-range, 7 partials from mid-range to the top, then 7 full reps — done as one set.'),
+    ex('Zottman Curl','Arms','Dumbbell','weight_reps','Curl up with palms facing forward, rotate palms down at the top, lower slowly in that reversed grip.'),
+    ex('Reverse Curl','Arms','Barbell','weight_reps','Overhand grip, curl the bar up keeping elbows fixed, targets forearms and brachialis, lower under control.'),
+    ex('Machine Bicep Curl','Arms','Machine','weight_reps','Arms on the pad, curl the handles up through a fixed arc, squeeze at the top, lower under control.'),
+    ex('Close-Grip Bench Press','Arms','Barbell','weight_reps','Hands shoulder width or slightly narrower, lower the bar to the lower chest keeping elbows tucked, press up — triceps focused.'),
+    ex('Overhead Triceps Extension, Dumbbell','Arms','Dumbbell','weight_reps','Hold a dumbbell overhead with both hands, lower behind the head bending only at the elbows, extend back up.'),
+    ex('Overhead Triceps Extension, Cable','Arms','Cable','weight_reps','Facing away from a low pulley, extend the rope overhead, lower behind the head with control.'),
+    ex('Overhead Triceps Extension, Barbell','Arms','Barbell','weight_reps','Hold a barbell overhead, lower behind the head bending only at the elbows, extend back up.'),
+    ex('Triceps Kickback','Arms','Dumbbell','weight_reps','Hinge forward, upper arm parallel to the floor, extend the forearm back until straight, squeeze, return.'),
+    ex('Rope Triceps Pushdown','Arms','Cable','weight_reps','Elbows pinned at the sides, push the rope down and spread it apart at the bottom, control back up.'),
+    ex('V-Bar Triceps Pushdown','Arms','Cable','weight_reps','Elbows pinned at the sides, push the V-bar down fully, control back up.'),
+    ex('JM Press','Arms','Barbell','weight_reps','A hybrid between a close-grip bench press and skullcrusher — lower the bar toward the neck/chin, press back up.'),
+    ex('Diamond Push-Up','Arms','Bodyweight','bodyweight','Hands together under the chest forming a diamond shape, lower and press back up — heavily targets triceps.'),
+    ex('Bench Dip','Arms','Bodyweight','bodyweight','Hands on a bench behind you, legs extended, lower by bending the elbows, press back up.'),
+    ex('Machine Triceps Extension','Arms','Machine','weight_reps','Arms on the pad, extend the handles down and forward, squeeze at full extension, control the return.'),
+    ex('Wrist Curl','Arms','Dumbbell','weight_reps','Forearms resting on a bench, curl the wrists up against the weight, lower with control — forearm isolation.'),
+    ex('Reverse Wrist Curl','Arms','Dumbbell','weight_reps','Forearms resting on a bench palms down, extend the wrists up against the weight, lower with control.'),
+
+    // --- LEGS ---
+    ex('Box Squat','Legs','Barbell','weight_reps','Squat down to lightly touch a box at or below parallel, pause, drive back up without relaxing at the bottom.'),
+    ex('Goblet Squat','Legs','Dumbbell','weight_reps','Hold a dumbbell vertically at chest height, squat down between the knees, drive back up.'),
+    ex('Hack Squat','Legs','Machine','weight_reps','Back against the pad on a hack squat machine, lower until knees reach ~90°, press through the full foot.'),
+    ex('Zercher Squat','Legs','Barbell','weight_reps','Bar held in the crooks of the elbows, squat down keeping the torso upright, drive back up.'),
+    ex('Safety Bar Squat','Legs','Barbell','weight_reps','Squat with a safety squat bar resting on the shoulders, handles held forward, descend and drive up.'),
+    ex('Pause Squat','Legs','Barbell','weight_reps','Standard back squat with a 2-3 second pause at the bottom before driving up — builds strength out of the hole.'),
+    ex('Smith Machine Squat','Legs','Smith Machine','weight_reps','Bar locked to vertical rails on the upper back, squat down and drive up through a fixed path.'),
+    ex('Sumo Squat','Legs','Dumbbell','weight_reps','Wide stance, toes turned out, holding a dumbbell or kettlebell, squat down between the legs, drive back up.'),
+    ex('Walking Lunge','Legs','Dumbbell','weight_reps','Step forward into a lunge, drive through the front heel to bring the back foot through into the next step.'),
+    ex('Reverse Lunge','Legs','Dumbbell','weight_reps','Step backward into a lunge until the front thigh is parallel, drive through the front heel to return to standing.'),
+    ex('Lateral Lunge','Legs','Dumbbell','weight_reps','Step wide to one side, sit back into that hip keeping the other leg straight, push back to center.'),
+    ex('Curtsy Lunge','Legs','Dumbbell','weight_reps','Step one leg diagonally behind the other into a curtsy position, lower until both knees bend, return to standing.'),
+    ex('Deficit Bulgarian Split Squat','Legs','Dumbbell','weight_reps','Front foot elevated on a small platform, rear foot up on a bench, lower for extra range, drive back up.'),
+    ex('Stiff-Leg Deadlift','Legs','Barbell','weight_reps','Knees nearly straight, hinge at the hips lowering the bar close to the legs, feel a hamstring stretch, stand tall.'),
+    ex('Single-Leg Romanian Deadlift','Legs','Dumbbell','weight_reps','Balance on one leg, hinge forward lowering the dumbbell while the free leg extends back, return to standing.'),
+    ex('Glute Bridge','Legs','Bodyweight','bodyweight','Lying on the back, knees bent, drive the hips up squeezing the glutes at the top, lower with control.'),
+    ex('Cable Pull-Through','Legs','Cable','weight_reps','Facing away from a low pulley, hinge forward and pull the rope through between the legs, driving hips forward to finish.'),
+    ex('Standing Calf Raise','Legs','Machine','weight_reps','Balls of the feet on the platform, rise onto the toes as high as possible, pause, lower to a full stretch.'),
+    ex('Donkey Calf Raise','Legs','Machine','weight_reps','Bent forward at the hips on a donkey calf machine, rise onto the toes fully, lower to a deep stretch.'),
+    ex('Leg Press Calf Raise','Legs','Machine','weight_reps','Feet on the lower edge of the leg press platform, press through the toes extending the ankles, lower under control.'),
+    ex('Hip Adduction Machine','Legs','Machine','weight_reps','Seated with legs on the pads, squeeze the legs together against resistance, return with control.'),
+    ex('Hip Abduction Machine','Legs','Machine','weight_reps','Seated with legs on the pads, push the legs apart against resistance, return with control.'),
+    ex('Nordic Hamstring Curl','Legs','Bodyweight','bodyweight','Kneeling with ankles anchored, lower the torso forward as slowly as possible using the hamstrings, push back up.'),
+    ex('Glute Ham Raise','Legs','Machine','bodyweight','On a GHR bench, lower the torso forward under control using the hamstrings and glutes, curl back up to start.'),
+    ex('Cable Glute Kickback','Legs','Cable','weight_reps','Ankle cuff attached to a low cable, kick the leg back and up squeezing the glute, return with control.'),
+    ex('Sled Push','Legs','Sled','duration','Load the sled, drive it forward in short powerful steps keeping the chest low, track distance or time.'),
+    ex('Sled Pull','Legs','Sled','duration','Attach a harness or rope to the sled, walk or drive backward pulling the sled, track distance or time.'),
+    ex('Belt Squat','Legs','Machine','weight_reps','Weight hangs from a belt at the hips, squat down and drive up without loading the spine.'),
+    ex('Pistol Squat','Legs','Bodyweight','bodyweight','Balance on one leg, squat down as low as possible while the other leg extends forward, drive back up.'),
+    ex('Step-Down','Legs','Bodyweight','bodyweight','Standing on a box, lower one leg down to lightly tap the floor with control, drive back up through the standing leg.'),
+    ex('Machine Adductor Squeeze','Legs','Machine','weight_reps','Seated, squeeze the pads together using the inner thighs, control the return.'),
+
+    // --- CORE ---
+    ex('Sit-Up','Core','Bodyweight','bodyweight','Knees bent, feet anchored, curl the torso all the way up to the knees, lower with control.'),
+    ex('Crunch','Core','Bodyweight','bodyweight','Knees bent, curl the shoulder blades off the floor using the abs, lower with control.'),
+    ex('Reverse Crunch','Core','Bodyweight','bodyweight','Lying on the back, curl the hips up toward the chest using the lower abs, lower with control.'),
+    ex('Bicycle Crunch','Core','Bodyweight','bodyweight','Alternate bringing elbow to opposite knee in a pedaling motion, keep the lower back pressed down.'),
+    ex('Russian Twist','Core','Bodyweight','weight_reps','Seated, lean back slightly, rotate the torso side to side, optionally holding a weight.'),
+    ex('Cable Woodchopper','Core','Cable','weight_reps','Pull the cable diagonally across the body from high to low or low to high, rotating through the core.'),
+    ex('Hanging Knee Raise','Core','Bodyweight','bodyweight','Hang from a bar, raise the knees toward the chest without swinging, lower with control.'),
+    ex('Lying Leg Raise','Core','Bodyweight','bodyweight','Lying on the back, raise straight legs up to vertical using the lower abs, lower without touching down.'),
+    ex('Toes to Bar','Core','Bodyweight','bodyweight','Hang from a bar, raise the legs all the way up to touch the bar, lower with control.'),
+    ex('Mountain Climbers','Core','Bodyweight','duration','In a plank position, drive knees toward the chest alternately at speed, keep the hips low.'),
+    ex('Dead Bug','Core','Bodyweight','bodyweight','Lying on the back, extend opposite arm and leg while keeping the lower back pressed down, alternate sides.'),
+    ex('Hollow Body Hold','Core','Bodyweight','duration','Lying on the back, raise shoulders and legs slightly off the floor into a dish shape, brace and hold.'),
+    ex('Pallof Press','Core','Cable','weight_reps','Standing side-on to a cable, press the handle straight out from the chest resisting rotation, return.'),
+    ex('V-Up','Core','Bodyweight','bodyweight','Lying flat, simultaneously raise the torso and legs to meet in a V shape, lower with control.'),
+    ex('Flutter Kicks','Core','Bodyweight','duration','Lying on the back, legs straight, alternate small up-and-down kicks keeping the lower back pressed down.'),
+    ex('Weighted Sit-Up','Core','Dumbbell','weight_reps','Holding a plate or dumbbell at the chest, curl the torso all the way up, lower with control.'),
+    ex('Decline Sit-Up','Core','Bodyweight','bodyweight','On a decline bench, feet anchored, curl the torso all the way up, lower with control for added resistance.'),
+    ex('Machine Crunch','Core','Machine','weight_reps','Seated, brace against the pad, crunch forward against the resistance, control the return.'),
+    ex('Stability Ball Crunch','Core','Bodyweight','bodyweight','Lying back over a stability ball, crunch the torso up using the abs, lower to a stretch.'),
+    ex('Dragon Flag','Core','Bodyweight','bodyweight','Lying on a bench holding it behind the head, raise the entire body straight up, lower as slowly as possible without the hips sagging.'),
+
+    // --- FULL BODY / OLYMPIC / FUNCTIONAL ---
+    ex('Power Clean','Full Body','Barbell','weight_reps','Pull the bar explosively from the floor, drop under it to catch on the front of the shoulders in a quarter squat, stand tall.'),
+    ex('Hang Clean','Full Body','Barbell','weight_reps','From a hang position above the knees, explosively extend and pull under the bar to catch on the shoulders, stand tall.'),
+    ex('Clean and Jerk','Full Body','Barbell','weight_reps','Clean the bar to the shoulders, dip and drive it overhead in a jerk, catch in a split or squat stance, stand tall.'),
+    ex('Snatch','Full Body','Barbell','weight_reps','Pull the bar from the floor to overhead in one continuous motion, catching in a squat, stand tall.'),
+    ex('Power Snatch','Full Body','Barbell','weight_reps','Pull the bar from the floor to overhead in one motion, catching in a quarter squat, stand tall.'),
+    ex('Clean Pull','Full Body','Barbell','weight_reps','Explosive triple extension pull of the clean without racking the bar — builds pulling power for the clean.'),
+    ex('Snatch Pull','Full Body','Barbell','weight_reps','Explosive triple extension pull of the snatch without catching overhead — builds pulling power for the snatch.'),
+    ex('Thruster','Full Body','Barbell','weight_reps','Front squat down, then drive up explosively pressing the bar overhead in one fluid motion.'),
+    ex('Push Jerk','Full Body','Barbell','weight_reps','Dip and drive the bar overhead, catching in a shallow squat, stand tall to finish.'),
+    ex('Kettlebell Snatch','Full Body','Kettlebell','weight_reps','Swing the kettlebell explosively from between the legs to an overhead lockout in one motion, lower under control.'),
+    ex('Kettlebell Clean','Full Body','Kettlebell','weight_reps','Swing the kettlebell up and rotate it into a front rack position at the shoulder, lower under control.'),
+    ex('Kettlebell Goblet Squat','Full Body','Kettlebell','weight_reps','Hold the kettlebell at chest height, squat down between the knees, drive back up.'),
+    ex('Turkish Get-Up','Full Body','Kettlebell','weight_reps','From lying down to standing while holding a kettlebell locked out overhead the whole time, reverse to return.'),
+    ex('Wall Ball','Full Body','Medicine Ball','weight_reps','Squat down holding a medicine ball at the chest, stand and throw the ball to a target on the wall, catch and repeat.'),
+    ex('Box Jump','Full Body','Box','weight_reps','Dip and explode upward landing softly on top of the box with both feet, step down and reset.'),
+    ex('Burpee','Full Body','Bodyweight','bodyweight','Drop to a plank, perform a push-up, jump the feet back to the hands, then jump up explosively.'),
+    ex('Man Maker','Full Body','Dumbbell','weight_reps','From a plank on dumbbells, row each arm, perform a push-up, jump feet in, then clean and press the dumbbells overhead.'),
+    ex('Battle Ropes','Full Body','Battle Ropes','duration','Alternate slamming the ropes up and down as fast as possible while maintaining a stable athletic stance.'),
+    ex('Bear Crawl','Full Body','Bodyweight','duration','Hands and feet on the floor, knees hovering, crawl forward keeping the hips low and core braced.'),
+    ex('Sledgehammer Slam','Full Body','Sledgehammer','weight_reps','Raise a sledgehammer overhead and slam it down onto a tire with full body power, alternate sides.'),
+    ex('Tire Flip','Full Body','Tire','weight_reps','Squat to grip the underside of the tire, drive through the legs and hips to flip it forward, repeat.'),
+    ex('Sandbag Carry','Full Body','Sandbag','duration','Carry a loaded sandbag against the chest or on a shoulder for distance or time, keeping the core braced.'),
+    ex('Yoke Walk','Full Body','Yoke','duration','Walk forward under a loaded yoke frame in short controlled steps, keeping the torso upright.'),
+
+    // --- CARDIO ---
+    ex('Elliptical','Cardio','Machine','cardio','Maintain a steady stride and posture; track distance, duration and calories.'),
+    ex('Assault Bike','Cardio','Machine','cardio','Push and pull the handles while pedaling for a full-body effort; track duration and calories.'),
+    ex('Ski Erg','Cardio','Machine','cardio','Pull the handles down and back in a skiing motion using the lats and core; track duration and calories.'),
+    ex('Swimming','Cardio','None','cardio','Log distance and duration from your swim; pace is calculated automatically.'),
+    ex('Walking','Cardio','None','cardio','Log distance and duration from your walk; pace is calculated automatically.'),
+    ex('Incline Treadmill Walk','Cardio','Machine','cardio','Set an incline and steady pace, avoid holding the rails; track distance, duration and calories.'),
+    ex('Outdoor Cycling','Cardio','None','cardio','Log distance and duration from your ride; pace is calculated automatically.'),
+    ex('Spin Class','Cardio','Machine','cardio','Track total duration and rough calories burned across the class intervals.'),
+    ex('HIIT Circuit','Cardio','None','cardio','Alternate short bursts of maximal effort with brief recovery; track total duration and calories.'),
+    ex('Shadow Boxing','Cardio','None','cardio','Throw combinations at speed while moving your feet; track duration and rough calories burned.'),
+  ];
+}
+
+function food(name, servingLabel, servingGrams, kcal, p, c, f, fiber, sodium, barcode){
+  return {id:uid(), name, brand:'', servingLabel, servingGrams, calories:kcal, protein:p, carbs:c, fat:f, fiber:fiber||0, sodium:sodium||0, barcode:barcode||'', custom:false, favorite:false};
+}
+function toggleFoodFavorite(id){
+  const f = foodById(id);
+  if(!f) return;
+  f.favorite = !f.favorite;
+  save();
+}
+function seedFoods(){
+  return [
+    food('Chicken Breast, cooked','100 g',100,165,31,0,3.6,0,74),
+    food('Chicken Thigh, cooked','100 g',100,209,26,0,10.9,0,84),
+    food('Ground Beef 90/10, cooked','100 g',100,176,20,0,10,0,66),
+    food('Salmon, cooked','100 g',100,208,20,0,13,0,59),
+    food('Tuna, canned in water','1 can (142g)',142,120,26,0,1,0,320),
+    food('Egg, large','1 egg',50,72,6.3,0.4,4.8,0,71),
+    food('Egg White','1 white',33,17,3.6,0.2,0,0,55),
+    food('Greek Yogurt, plain nonfat','170 g (1 cup)',170,100,17,6,0,0,61),
+    food('Cottage Cheese, low fat','100 g',100,90,11,4,2.5,0,330),
+    food('Whey Protein Powder','1 scoop (30g)',30,120,24,3,1.5,0,50),
+    food('Tofu, firm','100 g',100,144,15,3,9,2,14),
+    food('Black Beans, cooked','100 g',100,132,8.9,24,0.5,8.7,1),
+    food('Lentils, cooked','100 g',100,116,9,20,0.4,7.9,2),
+    food('White Rice, cooked','100 g',100,130,2.7,28,0.3,0.4,1),
+    food('Brown Rice, cooked','100 g',100,112,2.6,24,0.9,1.8,5),
+    food('Quinoa, cooked','100 g',100,120,4.4,21,1.9,2.8,7),
+    food('Oats, dry','40 g',40,150,5.3,27,2.6,4,0),
+    food('Whole Wheat Bread','1 slice',32,80,4,14,1,2,144),
+    food('White Bread','1 slice',26,67,2,13,0.9,0.6,130),
+    food('Sweet Potato, baked','100 g',100,90,2,21,0.2,3.3,36),
+    food('Potato, baked','1 medium (173g)',173,161,4.3,37,0.2,3.8,17),
+    food('Whole Wheat Pasta, cooked','100 g',100,124,5.3,25,1.1,3.9,4),
+    food('Banana','1 medium (118g)',118,105,1.3,27,0.4,3.1,1),
+    food('Apple','1 medium (182g)',182,95,0.5,25,0.3,4.4,2),
+    food('Orange','1 medium (131g)',131,62,1.2,15,0.2,3.1,0),
+    food('Blueberries','100 g',100,57,0.7,14,0.3,2.4,1),
+    food('Strawberries','100 g',100,32,0.7,7.7,0.3,2,1),
+    food('Avocado','1/2 fruit (100g)',100,160,2,8.5,14.7,6.7,7),
+    food('Almonds','28 g (1 oz)',28,164,6,6,14,3.5,0),
+    food('Peanut Butter','2 tbsp (32g)',32,188,8,6,16,2,147),
+    food('Olive Oil','1 tbsp (14g)',14,119,0,0,13.5,0,0),
+    food('Butter','1 tbsp (14g)',14,102,0.1,0,11.5,0,82),
+    food('Broccoli, steamed','100 g',100,35,2.4,7,0.4,3.3,33),
+    food('Spinach, raw','100 g',100,23,2.9,3.6,0.4,2.2,79),
+    food('Mixed Salad Greens','100 g',100,17,1.4,3.3,0.2,1.6,10),
+    food('Carrots, raw','100 g',100,41,0.9,10,0.2,2.8,69),
+    food('Broccoli & Cheese Rice','1 cup (195g)',195,220,6,38,5,3,540),
+    food('Whole Milk','1 cup (244g)',244,149,7.7,12,8,0,105),
+    food('Skim Milk','1 cup (245g)',245,83,8.3,12,0.2,0,103),
+    food('Almond Milk, unsweetened','1 cup (240g)',240,39,1.4,1.5,2.9,0.5,150),
+    food('Cheddar Cheese','28 g (1 oz)',28,113,7,0.4,9.3,0,174),
+    food('Mozzarella, part-skim','28 g (1 oz)',28,72,6.9,0.8,4.5,0,175),
+    food('Protein Bar (generic)','1 bar (60g)',60,220,20,24,7,9,210),
+    food('Granola Bar (oats & honey)','1 bar (24g)',24,110,2,17,4,1.5,66),
+    food('Dark Chocolate 70%','28 g (1 oz)',28,170,2.2,13,12,3.1,6),
+    food('Protein Shake (RTD)','1 bottle (330ml)',330,160,30,5,3,1,190),
+    food('Grilled Chicken Salad (fast casual)','1 bowl',350,350,35,20,14,5,780),
+    food('Cheeseburger (fast food)','1 burger',150,300,17,32,13,1.5,720),
+    food('Chicken Burrito Bowl','1 bowl',450,650,42,68,22,9,1350),
+    food('Caesar Salad w/ Chicken','1 bowl',400,470,35,15,29,3,1120),
+    food('Pepperoni Pizza','1 slice (107g)',107,285,12,36,10,2,640),
+    food('Sushi Roll (California)','8 pieces (180g)',180,255,9,38,7,3,428),
+    food('French Fries (medium)','1 medium (117g)',117,365,3.8,48,17,4.1,246),
+    food('Black Coffee','1 cup (237ml)',237,2,0.3,0,0,0,5),
+    food('Latte, whole milk','1 cup (240ml)',240,150,8,12,8,0,100),
+    food('Orange Juice','1 cup (248ml)',248,110,1.7,26,0.5,0.5,2),
+    food('Soda (cola)','1 can (355ml)',355,140,0,39,0,0,45),
+    food('Beer, regular','1 can (355ml)',355,153,1.6,13,0,0,14),
+    food('Red Wine','5 fl oz (147ml)',147,125,0.1,3.8,0,0,6),
+    food('Protein Pancakes (mix)','2 pancakes (100g)',100,220,20,24,5,2,360),
+
+    // --- Grains, pasta, breads & potatoes (expanded) ---
+    food('Jasmine Rice, cooked','100 g',100,129,2.4,28,0.2,0.4,1),
+    food('Basmati Rice, cooked','100 g',100,121,2.5,25,0.4,0.6,1),
+    food('Fried Rice','1 cup (198g)',198,333,8,41,13,1.5,690),
+    food('Rice Noodles, cooked','100 g',100,109,1.8,25,0.2,1,10),
+    food('Egg Noodles, cooked','100 g',100,138,4.5,25,2.1,1.2,9),
+    food('Spaghetti, cooked','100 g',100,158,5.8,31,0.9,1.8,1),
+    food('Macaroni, cooked','100 g',100,157,5.8,30.9,0.9,1.8,1),
+    food('Couscous, cooked','100 g',100,112,3.8,23,0.2,1.4,5),
+    food('Bagel, plain','1 medium (98g)',98,257,10,50,1.5,2.2,460),
+    food('Sourdough Bread','1 slice (32g)',32,84,3.3,16.4,0.6,0.8,180),
+    food('Rye Bread','1 slice (32g)',32,83,2.7,15.5,1,1.9,211),
+    food('Pita Bread','1 whole (60g)',60,165,5.5,33,0.7,1.3,322),
+    food('Naan Bread','1 piece (90g)',90,262,8.7,45,5,1.9,418),
+    food('Tortilla, flour','1 medium (49g)',49,146,3.9,24,3.6,1.4,364),
+    food('Tortilla, corn','1 small (24g)',24,52,1.4,11,0.6,1.4,11),
+    food('Mashed Potato','1 cup (210g)',210,214,4,35,8.8,3.8,610),
+    food('Hash Browns','1 cup (156g)',156,326,3.8,33,21,3.1,37),
+    food('Red Potato, boiled','100 g',100,87,2,20,0.1,1.8,4),
+    food('Cassava, boiled','100 g',100,160,1.4,38,0.3,1.8,14),
+
+    // --- Fruits (expanded) ---
+    food('Grapes','100 g',100,69,0.7,18,0.2,0.9,2),
+    food('Watermelon','1 cup diced (152g)',152,46,0.9,11.5,0.2,0.6,2),
+    food('Pineapple','1 cup chunks (165g)',165,82,0.9,21.6,0.2,2.3,2),
+    food('Mango','1 cup sliced (165g)',165,99,1.4,25,0.6,2.6,2),
+    food('Peach','1 medium (150g)',150,58,1.4,14,0.4,2.3,0),
+    food('Pear','1 medium (178g)',178,101,0.6,27,0.2,5.5,2),
+    food('Kiwi','1 medium (69g)',69,42,0.8,10.1,0.4,2.1,2),
+    food('Cherries','1 cup (154g)',154,97,1.6,25,0.3,3.2,0),
+    food('Raspberries','100 g',100,52,1.2,12,0.7,6.5,1),
+    food('Pomegranate Seeds','100 g',100,83,1.7,19,1.2,4,3),
+    food('Dates, dried','2 dates (48g)',48,133,0.9,36,0.2,3.2,1),
+
+    // --- Vegetables (expanded) ---
+    food('Bell Pepper','100 g',100,31,1,6,0.3,2.1,4),
+    food('Cucumber','100 g',100,15,0.7,3.6,0.1,0.5,2),
+    food('Tomato','1 medium (123g)',123,22,1.1,4.8,0.2,1.5,6),
+    food('Onion, raw','100 g',100,40,1.1,9.3,0.1,1.7,4),
+    food('Garlic','3 cloves (9g)',9,13,0.6,3,0,0.2,2),
+    food('Zucchini','100 g',100,17,1.2,3.1,0.3,1,8),
+    food('Cauliflower','100 g',100,25,1.9,5,0.3,2,30),
+    food('Green Beans','100 g',100,31,1.8,7,0.2,3.4,6),
+    food('Corn, sweet','1 cup kernels (154g)',154,177,5.4,41,2.1,4.6,15),
+    food('Mushrooms, white','100 g',100,22,3.1,3.3,0.3,1,5),
+    food('Cabbage, raw','100 g',100,25,1.3,5.8,0.1,2.5,18),
+    food('Kale, raw','100 g',100,49,4.3,8.8,0.9,3.6,38),
+    food('Asparagus, steamed','100 g',100,22,2.4,4.1,0.2,2,14),
+    food('Peas, green','100 g',100,81,5.4,14,0.4,5.7,5),
+    food('Butternut Squash, roasted','100 g',100,40,0.9,10.5,0.1,1.6,4),
+
+    // --- Meats, fish, eggs & dairy (expanded) ---
+    food('Turkey Breast, cooked','100 g',100,135,30,0,1,0,50),
+    food('Pork Chop, cooked','100 g',100,231,25,0,14,0,58),
+    food('Pork Tenderloin, cooked','100 g',100,143,26,0,3.5,0,50),
+    food('Bacon, cooked','2 slices (16g)',16,86,5.8,0.2,6.7,0,296),
+    food('Ham, sliced','2 slices (56g)',56,92,10.5,1.8,4.5,0,742),
+    food('Lamb, cooked','100 g',100,258,25,0,17,0,72),
+    food('Shrimp, cooked','100 g',100,99,24,0.2,0.3,0,111),
+    food('Tilapia, cooked','100 g',100,128,26,0,2.7,0,56),
+    food('Cod, cooked','100 g',100,105,23,0,0.9,0,78),
+    food('Sardines, canned in oil','1 can (92g)',92,191,22.7,0,10.5,0,282),
+    food('Duck Breast, cooked','100 g',100,201,23.5,0,11.2,0,67),
+    food('Sirloin Steak, cooked','100 g',100,201,27,0,10,0,56),
+    food('Ground Turkey 93/7, cooked','100 g',100,176,22,0,9,0,80),
+    food('Deli Turkey Slices','2 oz (56g)',56,60,10,2,1,0,450),
+    food('Fried Egg','1 egg',50,90,6.3,0.4,7,0,95),
+    food('Parmesan Cheese','2 tbsp grated (10g)',10,43,3.8,0.4,2.9,0,116),
+    food('Feta Cheese','28 g (1 oz)',28,75,4,1.2,6,0,312),
+    food('Cream Cheese','2 tbsp (29g)',29,99,1.7,1.6,9.8,0,90),
+    food('Sour Cream','2 tbsp (29g)',29,52,0.6,1.3,5,0,12),
+    food('Ricotta Cheese','1/2 cup (124g)',124,197,13.7,4.9,14.2,0,132),
+    food('Half and Half','2 tbsp (30ml)',30,39,0.9,1.3,3.5,0,12),
+    food('Heavy Cream','2 tbsp (30ml)',30,102,0.6,0.8,10.8,0,11),
+    food('Plain Yogurt, whole milk','1 cup (245g)',245,149,8.5,11.4,8,0,113),
+    food('Soy Milk, unsweetened','1 cup (243g)',243,80,7,4,4,1.2,90),
+
+    // --- Snacks, condiments, oils & sauces (expanded) ---
+    food('Potato Chips','1 oz (28g)',28,152,2,15,10,1.1,149),
+    food('Tortilla Chips','1 oz (28g)',28,140,2,18,7,1.4,120),
+    food('Popcorn, air-popped','3 cups (24g)',24,93,3.1,18.7,1.1,3.5,1),
+    food('Pretzels','1 oz (28g)',28,108,2.6,22.5,1,0.9,486),
+    food('Trail Mix','1/4 cup (38g)',38,173,5,17,11,2.1,60),
+    food('Rice Cakes','1 cake (9g)',9,35,0.7,7.3,0.3,0.4,15),
+    food('Hummus','2 tbsp (30g)',30,70,2,4,5,2,130),
+    food('Guacamole','2 tbsp (30g)',30,50,0.6,3,4.5,2,75),
+    food('Salsa','2 tbsp (32g)',32,10,0.4,2.2,0.1,0.5,120),
+    food('Ketchup','1 tbsp (17g)',17,17,0.2,4.5,0,0.1,154),
+    food('Mustard','1 tsp (5g)',5,3,0.2,0.3,0.2,0.1,57),
+    food('Mayonnaise','1 tbsp (14g)',14,94,0.1,0.1,10.3,0,88),
+    food('Soy Sauce','1 tbsp (16g)',16,9,1.3,0.8,0,0.1,902),
+    food('BBQ Sauce','2 tbsp (36g)',36,52,0.3,13,0.2,0.2,395),
+    food('Ranch Dressing','2 tbsp (30g)',30,129,0.4,1.8,13.5,0,270),
+    food('Balsamic Vinaigrette','2 tbsp (30ml)',30,90,0,3,9,0,240),
+    food('Honey','1 tbsp (21g)',21,64,0.1,17.3,0,0,1),
+    food('Maple Syrup','1 tbsp (20g)',20,52,0,13.4,0,0,2),
+    food('Jam / Jelly','1 tbsp (20g)',20,56,0.1,13.8,0,0.2,6),
+    food('Coconut Oil','1 tbsp (14g)',14,121,0,0,13.5,0,0),
+    food('Canola Oil','1 tbsp (14g)',14,124,0,0,14,0,0),
+    food('Sesame Oil','1 tbsp (14g)',14,120,0,0,13.6,0,0),
+
+    // --- Fast food / restaurant items (expanded) ---
+    food('Chicken Nuggets','6 pieces (99g)',99,280,14,17,17,1,540),
+    food('Fast Food Chicken Sandwich','1 sandwich (220g)',220,530,29,45,26,2,1130),
+    food('Fried Chicken, 2 pieces','2 pieces (220g)',220,548,38,17,36,0.8,1170),
+    food('Chicken Shawarma Wrap','1 wrap (300g)',300,600,35,58,25,4,1250),
+    food('Doner Kebab','1 wrap (350g)',350,700,32,60,35,4,1400),
+    food('Beef Taco','1 taco (102g)',102,210,10,15,12,3,340),
+    food('Beef Burrito','1 burrito (325g)',325,510,20,64,20,8,1330),
+    food('Meat Lovers Pizza Slice','1 slice (130g)',130,340,15,29,19,2,780),
+    food('Vegetable Spring Roll','2 rolls (90g)',90,150,3,20,7,2,320),
+    food('Pad Thai','1 plate (350g)',350,600,20,74,22,3,1200),
+    food('Chicken Fried Rice','1 cup (250g)',250,410,18,55,13,2,880),
+    food('Fish and Chips','1 serving (400g)',400,880,35,80,48,4,1100),
+    food('Hot Dog with Bun','1 hot dog (98g)',98,290,10,23,17,1,830),
+    food('Ice Cream, vanilla','1/2 cup (66g)',66,137,2.3,16,7.3,0.5,53),
+    food('Milkshake, chocolate','1 medium (355ml)',355,530,10,80,18,1,300),
+
+    // --- African / regional staples ---
+    food('Ugali (maize meal, cooked)','1 cup (200g)',200,232,4.8,50,1,2.4,4),
+    food('Nshima (maize meal, cooked)','1 cup (200g)',200,232,4.8,50,1,2.4,4),
+    food('Sadza (maize meal, cooked)','1 cup (200g)',200,232,4.8,50,1,2.4,4),
+    food('Pap (maize porridge, cooked)','1 cup (200g)',200,232,4.8,50,1,2.4,4),
+    food('Fufu (cassava/plantain, pounded)','1 cup (200g)',200,296,1.6,71,0.4,3.6,10),
+    food('Injera (teff flatbread)','1 piece (80g)',80,166,5.4,34,1,3.8,6),
+    food('Jollof Rice','1 cup (200g)',200,320,6,52,10,2.5,560),
+    food('Egusi Soup','1 cup (245g)',245,310,15,10,24,4,620),
+    food('Groundnut (Peanut) Stew','1 cup (245g)',245,340,18,14,24,4,540),
+    food('Chapati','1 piece (60g)',60,180,4,30,5,1.5,190),
+    food('Samosa','1 piece (60g)',60,150,3.5,17,8,1.4,210),
+    food('Plantain, fried (dodo)','1 cup (150g)',150,320,1.8,58,10,3,6),
+    food('Suya (spiced grilled beef)','100 g',100,250,26,3,15,1,420),
+    food('Biltong','1 oz (28g)',28,60,12,1,1,0,310),
+    food('Doro Wat (Ethiopian chicken stew)','1 cup (245g)',245,350,28,10,22,2,780),
+
+    // --- Additional everyday coverage ---
+    food('Chicken Drumstick, cooked','100 g',100,172,28.3,0,5.7,0,86),
+    food('Chicken Wings, baked','100 g',100,203,30.5,0,8.1,0,82),
+    food('Beef Brisket, cooked','100 g',100,221,24,0,13,0,60),
+    food('Mackerel, cooked','100 g',100,262,23.9,0,17.8,0,90),
+    food('Tempeh','100 g',100,192,20.3,7.6,10.8,9,9),
+    food('Chickpeas, cooked','100 g',100,164,8.9,27.4,2.6,7.6,7),
+    food('Bread Roll, dinner','1 roll (28g)',28,84,2.4,14.2,1.8,0.7,146),
+    food('Corn Flakes','1 cup (28g)',28,100,2,24,0.1,0.7,200),
+    food('Granola Cereal','1/2 cup (55g)',55,240,6,36,9,4,130),
+    food('Lemon','1 medium (58g)',58,17,0.6,5.4,0.2,1.6,1),
+    food('Lettuce, Iceberg','100 g',100,14,0.9,3,0.1,1.2,10),
+    food('Oat Milk, unsweetened','1 cup (240g)',240,120,3,16,5,2,100),
+    food('Vegetable Oil','1 tbsp (14g)',14,124,0,0,14,0,0),
+    food('Cashews','28 g (1 oz)',28,157,5.2,8.6,12.4,0.9,3),
+    food('Walnuts','28 g (1 oz)',28,185,4.3,3.9,18.5,1.9,1),
+    food('Sunflower Seeds','28 g (1 oz)',28,165,5.5,6.8,14.6,3,1),
+    food('Digestive Biscuits','2 biscuits (32g)',32,140,2,20,6,1,130),
+    food('Tea, black (plain)','1 cup (237ml)',237,2,0,0.5,0,0,7),
+
+    // --- Breakfast cereals, bars & spreads
+    food('Corn Flakes Cereal (branded)','1 cup (28g)',28,100,2,24,0.3,1,210,'41234500001'),
+    food('Bran Flakes Cereal','3/4 cup (30g)',30,98,3,24,0.7,5,220,'41234500002'),
+    food('Frosted Flakes Cereal','3/4 cup (30g)',30,110,1,26,0,1,150,'41234500003'),
+    food('Honey Nut Cereal','3/4 cup (30g)',30,115,2,23,1.5,2,190,'41234500004'),
+    food('Muesli','1/2 cup (50g)',50,180,5,32,3,4,15,'41234500005'),
+    food('Steel-Cut Oats, cooked','1 cup (240g)',240,160,5,27,3,4,7,''),
+    food('Instant Oatmeal, flavored packet','1 packet (43g)',43,160,4,32,2,3,160,'41234500006'),
+    food('Breakfast Biscuit Bar','2 biscuits (50g)',50,220,4,32,8,3,160,'41234500007'),
+    food('Cereal Bar, fruit filled','1 bar (37g)',37,136,1.5,28,3,1,100,'41234500008'),
+    food('English Muffin','1 whole (57g)',57,134,5,26,1,1.5,218,'41234500009'),
+    food('Croissant, butter','1 medium (57g)',57,231,5,26,12,1.5,300,'41234500010'),
+    food('Waffle, frozen toasted','2 waffles (70g)',70,180,4,28,6,1,380,'41234500011'),
+    food('Pancake, plain','1 medium (38g)',38,86,2.4,11,3.5,0.5,167,''),
+    food('Biscuit (US-style)','1 biscuit (57g)',57,212,4,27,10,1,540,'41234500012'),
+    food('Grits, cooked','1 cup (242g)',242,143,3.3,31,0.5,1,540,''),
+    food('Cream of Wheat, cooked','1 cup (244g)',244,133,4,28,0.5,1.5,3,''),
+    food('Almond Butter','2 tbsp (32g)',32,196,7,6,18,3.3,72,'41234500013'),
+    food('Cashew Butter','2 tbsp (32g)',32,188,5.6,8.8,16,1,90,'41234500014'),
+    food('Nutella / Chocolate Hazelnut Spread','2 tbsp (37g)',37,200,2.2,23,11,1.4,15,'41234500015'),
+
+    // --- Protein & supplement products
+    food('Whey Protein Powder, chocolate','1 scoop (31g)',31,120,24,4,1.5,1,130,'41234500016'),
+    food('Whey Protein Powder, vanilla','1 scoop (31g)',31,120,24,3,1.5,0,110,'41234500017'),
+    food('Plant Protein Powder, vanilla','1 scoop (33g)',33,130,21,5,2.5,2,180,'41234500018'),
+    food('Casein Protein Powder','1 scoop (34g)',34,120,24,3,1,0,60,'41234500019'),
+    food('Mass Gainer Shake (dry mix)','2 scoops (150g)',150,600,50,90,3,3,220,'41234500020'),
+    food('Protein Cookie','1 cookie (85g)',85,340,20,36,12,3,290,'41234500021'),
+    food('Protein Pudding Cup','1 cup (113g)',113,100,15,10,1.5,1,220,'41234500022'),
+    food('Protein Chips','1 oz (28g)',28,130,10,10,5,2,240,'41234500023'),
+    food('Collagen Peptides Powder, unflavored','1 scoop (20g)',20,70,18,0,0,0,45,'41234500024'),
+    food('BCAA Powder Drink Mix','1 scoop (10g)',10,10,2.5,0,0,0,25,'41234500025'),
+    food('Electrolyte Drink Mix','1 packet (7g)',7,25,0,6,0,0,240,'41234500026'),
+    food('Meal Replacement Shake, bottled','1 bottle (325ml)',325,250,20,30,7,5,290,'41234500027'),
+    food('Rice Cake Protein Bar','1 bar (40g)',40,150,10,18,4,2,140,'41234500028'),
+
+    // --- Dairy & alternatives
+    food('Greek Yogurt, flavored','170 g (1 cup)',170,150,15,19,3,0,65,'41234500029'),
+    food('Kefir, plain','1 cup (240ml)',240,110,9,12,2,0,125,'41234500030'),
+    food('String Cheese, mozzarella','1 stick (28g)',28,80,7,1,6,0,180,'41234500031'),
+    food('Cottage Cheese, flavored','1 cup (226g)',226,180,20,16,4,0,700,'41234500032'),
+    food('Oat Milk Creamer','1 tbsp (15ml)',15,20,0,3,1,0,5,'41234500033'),
+    food('Soy Yogurt, plain','1 cup (245g)',245,120,6,16,4,2,25,'41234500034'),
+    food('Coconut Yogurt, plain','1 cup (245g)',245,220,3,10,19,3,15,'41234500035'),
+    food('Lactose-Free Milk, 2%','1 cup (240ml)',240,130,8,12,5,0,125,''),
+    food('Buttermilk, low fat','1 cup (240ml)',240,98,8,12,2.2,0,257,''),
+    food('Provolone Cheese','28 g (1 oz)',28,98,7,0.6,7.5,0,245,''),
+    food('Swiss Cheese','28 g (1 oz)',28,106,7.6,1.5,7.8,0,54,''),
+    food('Blue Cheese','28 g (1 oz)',28,100,6,0.7,8.1,0,325,''),
+    food('Goat Cheese, soft','28 g (1 oz)',28,75,5.3,0.3,6,0,130,''),
+    food('Queso Fresco','28 g (1 oz)',28,80,5,1,6,0,220,''),
+    food('Halloumi Cheese, grilled','28 g (1 oz)',28,110,7,0.8,8.5,0,350,''),
+
+    // --- Fruits (more)
+    food('Dragon Fruit','1 cup diced (170g)',170,102,2.2,22,1.4,3,0,''),
+    food('Papaya','1 cup diced (145g)',145,55,0.9,14,0.4,2.5,4,''),
+    food('Lychee','10 fruits (100g)',100,66,0.8,17,0.4,1.3,1,''),
+    food('Apricot','3 medium (105g)',105,50,1.5,12,0.4,2,1,''),
+    food('Plum','1 medium (66g)',66,30,0.5,8,0.2,1,0,''),
+    food('Guava','1 fruit (55g)',55,37,1.4,8,0.5,3,1,''),
+    food('Starfruit','1 medium (91g)',91,28,1.2,6.1,0.3,2.5,2,''),
+    food('Persimmon','1 medium (168g)',168,118,1,31,0.3,6,2,''),
+    food('Tangerine / Mandarin','1 medium (88g)',88,47,0.7,12,0.3,1.6,1,''),
+    food('Grapefruit','1/2 fruit (123g)',123,52,0.9,13,0.2,2,0,''),
+    food('Cranberries, dried','1/4 cup (40g)',40,130,0,33,0,2,3,'41234500036'),
+    food('Raisins','1/4 cup (40g)',40,120,1.3,32,0.2,1.6,5,'41234500037'),
+    food('Figs, fresh','2 medium (100g)',100,74,0.8,19,0.3,2.9,1,''),
+    food('Figs, dried','2 figs (40g)',40,93,1.2,24,0.4,3.7,4,''),
+    food('Passion Fruit','1 fruit (18g)',18,17,0.4,4.2,0.1,1.9,5,''),
+    food('Coconut, shredded raw','1/4 cup (23g)',23,80,0.7,3.4,7.6,2,4,''),
+
+    // --- Vegetables (more)
+    food('Eggplant, cooked','100 g',100,35,0.8,8.6,0.2,2.5,1,''),
+    food('Radish','100 g',100,16,0.7,3.4,0.1,1.6,21,''),
+    food('Beet, cooked','100 g',100,44,1.7,10,0.2,2,77,''),
+    food('Turnip, cooked','100 g',100,26,0.8,6.4,0.1,1.6,20,''),
+    food('Artichoke, cooked','1 medium (120g)',120,64,3.5,14,0.4,7,120,''),
+    food('Brussels Sprouts, roasted','100 g',100,43,3.4,8.9,0.3,3.8,25,''),
+    food('Okra, cooked','100 g',100,33,2,7.5,0.2,3.2,7,''),
+    food('Leeks, cooked','100 g',100,31,0.8,7.3,0.2,0.9,10,''),
+    food('Celery','100 g',100,16,0.7,3,0.2,1.6,80,''),
+    food('Jicama, raw','1 cup (120g)',120,49,0.9,11.5,0.1,5.9,5,''),
+    food('Snow Peas','100 g',100,42,2.8,7.5,0.2,2.6,4,''),
+    food('Beetroot, pickled','1/2 cup (85g)',85,74,1,17,0.1,1.7,300,'41234500038'),
+    food('Water Chestnuts, canned','1/2 cup (70g)',70,60,0.9,14.8,0.1,1.8,7,'41234500039'),
+    food('Bamboo Shoots, canned','1/2 cup (66g)',66,12,1.2,2,0.3,1.2,5,'41234500040'),
+
+    // --- Grains / breads (more)
+    food('Barley, cooked','1 cup (157g)',157,193,3.6,44,0.7,6,4,''),
+    food('Farro, cooked','1 cup (194g)',194,200,7,42,1.5,5,5,''),
+    food('Polenta, cooked','1 cup (240g)',240,145,3,31,1,2,270,''),
+    food('Cornbread','1 piece (65g)',65,188,4,29,6,1.3,467,'41234500041'),
+    food('Multigrain Bread','1 slice (32g)',32,80,4,14,1.2,2,140,'41234500042'),
+    food('Ciabatta Roll','1 roll (85g)',85,220,7,42,2,2,430,'41234500043'),
+    food('Brioche Bun','1 bun (60g)',60,180,5,28,5,1,220,'41234500044'),
+    food('Hamburger Bun','1 bun (52g)',52,140,4.5,25,2,1,220,'41234500045'),
+    food('Hot Dog Bun','1 bun (43g)',43,120,4,22,1.5,1,206,'41234500046'),
+    food('Crackers, whole wheat','5 crackers (16g)',16,70,1.5,11,2.5,1.5,105,'41234500047'),
+    food('Saltine Crackers','5 crackers (14g)',14,60,1,10,1.5,0.5,180,'41234500048'),
+
+    // --- International dishes (large expansion)
+    food('Pho (beef noodle soup)','1 bowl (500g)',500,450,25,55,10,3,1400,''),
+    food('Ramen (pork broth)','1 bowl (500g)',500,550,25,65,20,3,1800,''),
+    food('Pad See Ew','1 plate (350g)',350,540,20,68,20,3,1300,''),
+    food('Butter Chicken','1 cup (245g)',245,438,27,10,32,2,760,''),
+    food('Chicken Tikka Masala','1 cup (245g)',245,410,28,12,28,2,900,''),
+    food('Chicken Biryani','1 cup (250g)',250,395,20,45,15,2,700,''),
+    food('Dal (lentil curry)','1 cup (240g)',240,230,12,32,6,8,540,''),
+    food('Palak Paneer','1 cup (240g)',240,320,14,12,25,4,620,''),
+    food('Falafel','4 pieces (85g)',85,270,10,26,15,5,480,''),
+    food('Tabbouleh','1 cup (135g)',135,140,3,17,7,3,190,''),
+    food('Gyro with Tzatziki','1 wrap (280g)',280,570,30,44,30,3,1050,''),
+    food('Moussaka','1 cup (250g)',250,330,17,15,23,3,480,''),
+    food('Paella','1 cup (240g)',240,360,18,45,11,2,720,''),
+    food('Empanada, beef','1 empanada (110g)',110,290,10,28,15,1.5,420,''),
+    food('Tamale, pork','1 tamale (115g)',115,285,9,25,17,2,410,''),
+    food('Enchiladas, chicken (2)','2 pieces (280g)',280,520,28,40,26,4,1100,''),
+    food('Quesadilla, cheese','1 quesadilla (150g)',150,510,22,38,30,2,980,''),
+    food('Ceviche','1 cup (200g)',200,180,25,12,3,1,620,''),
+    food('Dumplings, pork (steamed)','6 pieces (150g)',150,300,13,32,13,2,600,''),
+    food('Kung Pao Chicken','1 cup (245g)',245,435,28,20,27,2,980,''),
+    food("General Tso's Chicken",'1 cup (245g)',245,480,22,42,25,1.5,1050,''),
+    food('Sweet and Sour Pork','1 cup (245g)',245,420,18,45,19,1.5,760,''),
+    food('Mapo Tofu','1 cup (245g)',245,280,16,10,20,2,850,''),
+    food('Bibimbap','1 bowl (450g)',450,560,22,75,18,6,900,''),
+    food('Bulgogi (Korean beef)','1 cup (150g)',150,290,24,12,16,0.5,720,''),
+    food('Kimchi','1/2 cup (75g)',75,23,1.5,4,0.3,2,470,''),
+    food('Sushi, Salmon Nigiri','2 pieces (60g)',60,90,6,13,1.5,0.3,180,''),
+    food('Tempura Shrimp','4 pieces (100g)',100,240,12,20,13,0.5,410,''),
+    food('Chicken Katsu','1 serving (170g)',170,420,28,28,22,1.5,650,''),
+    food('Teriyaki Chicken','1 cup (245g)',245,340,30,22,13,0.5,980,''),
+    food('Poke Bowl, salmon','1 bowl (400g)',400,520,28,55,20,4,900,''),
+    food('Laksa','1 bowl (500g)',500,480,20,45,25,3,1400,''),
+    food('Nasi Goreng','1 plate (350g)',350,520,18,65,20,3,980,''),
+    food('Chicken Satay with Peanut Sauce','4 skewers (140g)',140,320,26,10,20,2,560,''),
+    food('Congee, plain','1 cup (245g)',245,110,2,24,0.5,0.5,320,''),
+    food('Peking Duck','100 g',100,337,19,5,27,0,90,''),
+
+    // --- African / Caribbean (expansion)
+    food('Jerk Chicken','100 g',100,220,26,4,11,0.5,480,''),
+    food('Rice and Peas (Caribbean)','1 cup (200g)',200,320,7,55,8,4,420,''),
+    food('Plantain, baked','1 cup (150g)',150,215,1.5,56,0.4,4,7,''),
+    food('Akara (bean fritters)','3 pieces (90g)',90,220,9,18,13,4,320,''),
+    food('Moin Moin (bean pudding)','1 slice (120g)',120,210,10,20,10,5,380,''),
+    food('Waakye (rice and beans)','1 cup (220g)',220,300,10,52,5,6,450,''),
+    food('Attieke (cassava couscous)','1 cup (180g)',180,270,2,62,0.5,3,10,''),
+    food('Bobotie','1 cup (230g)',230,340,20,15,22,2,600,''),
+    food('Piri Piri Chicken','100 g',100,215,25,3,11,0.3,520,''),
+    food('African Meat Pie','1 pie (110g)',110,310,10,28,18,1.5,450,''),
+    food('Kachumbari (tomato onion salad)','1 cup (120g)',120,45,1.2,10,0.3,2,150,''),
+    food('Matoke (stewed plantain)','1 cup (200g)',200,220,2,52,1,4,10,''),
+    food('Githeri (maize and beans)','1 cup (200g)',200,260,11,48,2,10,180,''),
+    food('Chin Chin (fried snack)','1 cup (60g)',60,290,4,35,15,1,90,'41234500049'),
+    food('Puff Puff','3 pieces (90g)',90,260,4,35,11,1,150,''),
+    food('Jollof Spaghetti','1 cup (220g)',220,340,9,52,10,2,580,''),
+    food('Meat Pie, Jamaican Patty (beef)','1 patty (140g)',140,410,13,35,25,2,560,'41234500050'),
+    food('Curry Goat','100 g',100,235,24,4,14,0.5,420,''),
+    food('Oxtail Stew','1 cup (245g)',245,380,28,10,25,1.5,650,''),
+    food('Escovitch Fish','1 fillet (170g)',170,320,28,12,18,1.5,480,''),
+
+    // --- Fast food / restaurant (more, generic)
+    food('French Fries, large','1 large (154g)',154,480,5.5,63,23,5,380,'41234500051'),
+    food('Breakfast Sandwich (egg, cheese, muffin)','1 sandwich (135g)',135,300,13,29,14,1.5,700,'41234500052'),
+    food('Donut, glazed','1 donut (60g)',60,240,3,26,14,1,220,'41234500053'),
+    food('Muffin, blueberry','1 muffin (113g)',113,380,5,53,16,2,380,'41234500054'),
+    food('Bagel with Cream Cheese','1 bagel (170g)',170,430,13,58,15,2.5,640,'41234500055'),
+    food('Turkey Sub Sandwich (6 inch)','1 sandwich (230g)',230,350,18,50,7,4,900,'41234500056'),
+    food('Italian Sub Sandwich (6 inch)','1 sandwich (240g)',240,480,20,48,22,3,1400,'41234500057'),
+    food('Veggie Pizza Slice','1 slice (125g)',125,240,10,32,8,2,520,'41234500058'),
+    food('Margherita Pizza Slice','1 slice (115g)',115,250,10,30,10,1.5,540,'41234500059'),
+    food('Double Cheeseburger','1 burger (220g)',220,470,28,34,25,1.5,1050,'41234500060'),
+    food('Veggie Burger, patty only','1 patty (85g)',85,140,12,15,5,5,380,'41234500061'),
+    food('Turkey Burger, patty only','1 patty (113g)',113,180,20,0,11,0,90,'41234500062'),
+    food('Chicken Caesar Wrap','1 wrap (255g)',255,540,32,40,28,2,1250,'41234500063'),
+    food('Loaded Nachos','1 plate (250g)',250,620,18,55,36,5,1050,'41234500064'),
+    food('Onion Rings','1 order (85g)',85,280,3.5,31,16,1.5,430,'41234500065'),
+    food('Mozzarella Sticks','4 pieces (113g)',113,380,17,30,21,2,900,'41234500066'),
+    food('Buffalo Wings','4 pieces (128g)',128,430,26,3,34,0,1500,'41234500067'),
+    food('Club Sandwich','1 sandwich (270g)',270,590,32,45,30,3,1300,'41234500068'),
+    food('BLT Sandwich','1 sandwich (180g)',180,450,15,35,28,2,900,'41234500069'),
+
+    // --- Beverages (more)
+    food('Sports Drink','1 bottle (591ml)',591,130,0,36,0,0,270,'41234500070'),
+    food('Energy Drink','1 can (250ml)',250,110,0,28,0,0,105,'41234500071'),
+    food('Kombucha','1 cup (240ml)',240,30,0,7,0,0,10,'41234500072'),
+    food('Sparkling Water, flavored','1 can (355ml)',355,0,0,0,0,0,0,'41234500073'),
+    food('Coconut Water','1 cup (240ml)',240,45,2,9,0.5,0,252,'41234500074'),
+    food('Chocolate Milk','1 cup (250ml)',250,208,8,26,8,1.2,150,'41234500075'),
+    food('Iced Coffee, black','1 cup (355ml)',355,5,0.3,1,0,0,10,''),
+    food('Matcha Latte','1 cup (355ml)',355,180,8,24,6,0,115,'41234500076'),
+    food('Chai Latte','1 cup (355ml)',355,190,7,30,5,0,95,'41234500077'),
+    food('Hot Chocolate','1 cup (250ml)',250,190,8,27,7,1.5,150,'41234500078'),
+    food('Smoothie, mixed berry','1 cup (300ml)',300,220,3,50,1.5,4,20,''),
+    food('Fruit Punch','1 cup (240ml)',240,120,0,30,0,0,35,'41234500079'),
+    food('Lemonade','1 cup (240ml)',240,110,0,29,0,0,10,'41234500080'),
+    food('Iced Tea, sweetened','1 cup (240ml)',240,90,0,24,0,0,10,'41234500081'),
+    food('Sweet Tea (Southern style)','1 cup (240ml)',240,110,0,28,0,0,10,''),
+    food('Protein Coffee (RTD)','1 bottle (325ml)',325,140,20,8,3,1,180,'41234500082'),
+    food('White Wine','5 fl oz (147ml)',147,121,0.1,3.8,0,0,5,''),
+    food('Whiskey','1.5 fl oz (44ml)',44,97,0,0,0,0,0,''),
+    food('Vodka Soda','1 drink (240ml)',240,96,0,0,0,0,10,''),
+    food('Margarita, on the rocks','1 drink (240ml)',240,280,0.1,30,0,0,15,''),
+    food('Hard Seltzer','1 can (355ml)',355,100,0,2,0,0,20,'41234500083'),
+
+    // --- Condiments / sauces / oils (more)
+    food('Teriyaki Sauce','1 tbsp (18g)',18,15,0.5,3,0,0,690,'41234500084'),
+    food('Hot Sauce','1 tsp (5g)',5,1,0.1,0.2,0,0,124,'41234500085'),
+    food('Sriracha','1 tbsp (17g)',17,15,0.3,3.5,0,0,270,'41234500086'),
+    food('Tzatziki','2 tbsp (30g)',30,30,1.5,2,2,0.2,90,''),
+    food('Pesto Sauce','2 tbsp (30g)',30,160,2,2,17,0.5,290,'41234500087'),
+    food('Marinara Sauce','1/2 cup (125g)',125,70,2,11,2,2,480,'41234500088'),
+    food('Alfredo Sauce','1/4 cup (60g)',60,110,2,4,10,0,430,'41234500089'),
+    food('Tahini','1 tbsp (15g)',15,89,2.6,3.2,8,1.4,17,''),
+    food('Chimichurri','2 tbsp (30g)',30,120,0.3,1.5,13,0.3,190,''),
+    food('Curry Paste (Thai)','1 tbsp (15g)',15,20,0.5,3,0.5,0.5,570,'41234500090'),
+    food('Coconut Milk, canned','1/4 cup (60ml)',60,110,1,2,11,0,10,'41234500091'),
+    food('Fish Sauce','1 tbsp (16g)',16,10,1.5,0.8,0,0,1400,'41234500092'),
+    food('Oyster Sauce','1 tbsp (18g)',18,9,0.3,2,0,0,490,'41234500093'),
+    food('Worcestershire Sauce','1 tbsp (17g)',17,13,0,3,0,0,167,'41234500094'),
+    food('Italian Dressing','2 tbsp (30ml)',30,85,0,3,8,0,480,'41234500095'),
+    food('Thousand Island Dressing','2 tbsp (30g)',30,118,0.3,4.5,11,0.2,300,'41234500096'),
+    food('Aioli','1 tbsp (14g)',14,100,0.1,0.3,11,0,75,''),
+    food('Avocado Oil','1 tbsp (14g)',14,124,0,0,14,0,0,''),
+    food('Ghee','1 tbsp (13g)',13,112,0,0,12.7,0,0,''),
+
+    // --- Snacks (more)
+    food('Rice Crackers','1 oz (28g)',28,110,2,23,1,0.5,220,'41234500097'),
+    food('Veggie Straws','1 oz (28g)',28,130,1,19,5,1,220,'41234500098'),
+    food('Cheese Puffs','1 oz (28g)',28,150,2,15,10,0.5,290,'41234500099'),
+    food('Beef Jerky','1 oz (28g)',28,116,9.4,3.1,7.3,0.5,590,'41234500100'),
+    food('Fruit Leather','1 roll (14g)',14,50,0,12,0.5,0.5,20,'41234500101'),
+    food('Edamame, steamed','1 cup (155g)',155,189,17,14,8,8,10,''),
+    food('Roasted Chickpeas','1/4 cup (30g)',30,120,5,16,4,4,190,'41234500102'),
+    food('Seaweed Snack','1 pack (5g)',5,20,1,1,1.5,0.5,90,'41234500103'),
+    food('Oat Bar, chewy','1 bar (28g)',28,125,2,20,4.5,1,90,'41234500104'),
+    food('Fig Bar','2 bars (57g)',57,200,2,42,4,3,150,'41234500105'),
+    food('Chocolate Covered Pretzels','1 oz (28g)',28,130,2,20,5,1,135,'41234500106'),
+    food('Kale Chips','1 oz (28g)',28,130,4,14,8,2,190,'41234500107'),
+    food('Corn Nuts','1 oz (28g)',28,130,2,20,4.5,1.5,270,'41234500108'),
+    food('Cheese Crackers','1 oz (28g)',28,140,3,17,7,0.5,280,'41234500109'),
+    food('Popcorn, movie theater butter','4 cups (32g)',32,160,2,16,10,3,290,'41234500110'),
+
+    // --- Desserts (more)
+    food('Brownie','1 square (56g)',56,240,3,36,10,1.5,150,'41234500111'),
+    food('Chocolate Chip Cookie','1 cookie (28g)',28,140,1.5,19,7,1,105,'41234500112'),
+    food('Cupcake, frosted','1 cupcake (65g)',65,260,2,38,12,0.5,220,'41234500113'),
+    food('Cheesecake Slice','1 slice (125g)',125,410,7,32,28,0.5,340,'41234500114'),
+    food('Apple Pie Slice','1 slice (155g)',155,296,2.4,42,13,2,327,'41234500115'),
+    food('Tiramisu','1 slice (120g)',120,380,6,35,24,1,110,'41234500116'),
+    food('Gelato, chocolate','1/2 cup (85g)',85,210,4,26,10,1.5,50,'41234500117'),
+    food('Sorbet, fruit','1/2 cup (100g)',100,130,0,32,0,1,10,'41234500118'),
+    food('Pudding Cup, chocolate','1 cup (113g)',113,150,2,26,4,1,160,'41234500119'),
+    food('Churro','1 piece (36g)',36,116,1.4,14,6.3,0.5,80,'41234500120'),
+    food('Baklava','1 piece (40g)',40,180,3,17,12,1,90,'41234500121'),
+    food('Flan','1 slice (110g)',110,220,5,35,7,0,80,''),
+    food('Macarons','2 pieces (30g)',30,140,2,20,6,0.5,15,'41234500122'),
+    food('Rice Pudding','1/2 cup (120g)',120,170,4,29,4,0.5,80,''),
+
+    // --- Additional protein / meat / seafood
+    food('Crab Meat, cooked','100 g',100,97,19,0,1.5,0,395,''),
+    food('Lobster, cooked','100 g',100,89,19,0,0.9,0,296,''),
+    food('Scallops, cooked','100 g',100,111,20.5,5,0.8,0,667,''),
+    food('Mussels, cooked','100 g',100,172,24,7.4,4.5,0,369,''),
+    food('Oysters, raw','6 medium (84g)',84,50,4.4,5.2,1.3,0,151,''),
+    food('Anchovies, canned in oil','5 fillets (20g)',20,42,5.8,0,1.9,0,734,'41234500123'),
+    food('Veal, cooked','100 g',100,196,27,0,9,0,80,''),
+    food('Bison, cooked','100 g',100,146,22,0,6,0,60,''),
+    food('Venison, cooked','100 g',100,158,30,0,3.2,0,55,''),
+    food('Rabbit, cooked','100 g',100,173,29,0,6,0,45,''),
+    food('Chorizo','2 oz (56g)',56,258,14,1,22,0,730,'41234500124'),
+    food('Salami','1 oz (28g)',28,110,6,0.5,9,0,470,'41234500125'),
+    food('Pastrami','2 oz (56g)',56,99,15,1,4,0,890,'41234500126'),
+    food('Prosciutto','2 slices (30g)',30,66,10,0.3,2.6,0,760,'41234500127'),
+    food('Liver, beef, cooked','100 g',100,175,26,3.9,4.9,0,72,''),
+
+    // --- More vegetarian / plant protein
+    food('Seitan','100 g',100,370,75,14,1.9,0.6,29,''),
+    food('Edamame, shelled','1/2 cup (78g)',78,94,8.5,7,4,4,4,''),
+    food('Textured Vegetable Protein (TVP), dry','1/4 cup (30g)',30,90,13,9,0.5,4,10,''),
+    food('Falafel Mix, prepared','4 pieces (85g)',85,270,10,26,15,5,480,''),
+    food('Natto','100 g',100,212,17.7,14,11,5.4,7,''),
+    food('Vegan Sausage','1 link (75g)',75,150,15,7,7,3,420,'41234500128'),
+    food('Vegan Burger Patty (Beyond/Impossible style)','1 patty (113g)',113,250,20,7,18,2,390,'41234500129'),
+    food('Vegan Cheese Shreds','1/4 cup (28g)',28,80,0,6,6,0,290,'41234500130'),
+
+    // --- Zambian staples & nshima variants ---
+    food('Nshima, cassava meal','1 cup (200g)',200,250,1.5,60,0.3,2,5,''),
+    food('Mealie Meal, Breakfast (dry)','1 cup (125g)',125,455,9,98,2,4,5,'41234500131'),
+    food('Mealie Meal, Roller (dry)','1 cup (125g)',125,440,10,92,3.5,7,5,'41234500132'),
+    food('Samp and Beans','1 cup (240g)',240,280,12,52,2.5,9,320,''),
+    food('Chikwanga (cassava, steamed in leaves)','1 piece (150g)',150,240,1.5,58,0.3,2,5,''),
+
+    // --- Zambian relishes / ndiwo ---
+    food('Ifisashi (Spinach & Groundnut Stew)','1 cup (245g)',245,230,9,12,17,6,420,''),
+    food('Chibwabwa (pumpkin leaves relish)','1 cup (150g)',150,70,3,8,3.5,4,260,''),
+    food('Katapa / Kalembula (sweet potato leaves relish)','1 cup (150g)',150,75,3,9,3.5,4,240,''),
+    food('Delele (Zambian okra relish)','1 cup (150g)',150,90,3,10,4.5,4,280,''),
+    food('Rape, sautéed','1 cup (130g)',130,70,3,8,3.5,3,220,''),
+    food('Cabbage, fried (Zambian style)','1 cup (100g)',100,90,1.5,8,6,2.5,210,''),
+    food('Beans in Groundnut Sauce','1 cup (245g)',245,310,15,34,14,10,380,''),
+    food('Beans, plain (Zambian relish)','1 cup (240g)',240,245,15,44,1,15,380,''),
+
+    // --- Zambian proteins & fish ---
+    food('Village Chicken, stewed (free-range)','100 g',100,190,27,0,8,0,320,''),
+    food('Kapenta, dried & fried (relish)','1 cup (85g)',85,230,28,3,11,0,780,''),
+    food('Kapenta, dried (packet)','1/2 cup (40g)',40,140,26,0,3,0,650,'41234500133'),
+    food('Dried Bream (relish)','100 g',100,250,40,0,9,0,650,''),
+    food('Bream, grilled','100 g',100,145,24,0,5,0,65,''),
+    food('Buka Buka (Nile perch), grilled','100 g',100,150,26,0,4.5,0,70,''),
+    food('Chikanda (African Polony)','1 slice (80g)',80,190,8,12,13,3,210,''),
+    food('Ifinkubala (caterpillars, fried)','1 cup (60g)',60,150,22,4,5,2,320,''),
+    food('Inswa (flying termites, fried)','1/2 cup (40g)',40,130,12,1,9,0,210,''),
+    food('Goat Meat Stew','1 cup (245g)',245,310,30,6,18,1,520,''),
+    food('T-Bone Steak, grilled (braai)','100 g',100,245,27,0,15,0,65,''),
+    food('Zambian Beef Stew','1 cup (245g)',245,340,26,10,21,2,610,''),
+
+    // --- Zambian drinks (traditional) ---
+    food('Munkoyo (fermented traditional drink)','1 cup (240ml)',240,90,1,21,0.3,0.5,15,''),
+    food('Mabisi (fermented milk)','1 cup (245g)',245,150,8,12,8,0,110,''),
+    food('Chibwantu (fermented maize drink)','1 cup (240ml)',240,95,1,22,0.3,0.5,10,''),
+    food('Mahewu (fermented maize drink)','1 cup (240ml)',240,100,1.2,23,0.3,0.5,15,''),
+
+    // --- Zambian snacks & sides ---
+    food('Vitumbuwa (Zambian fritters)','3 pieces (90g)',90,260,5,34,12,1,190,''),
+    food('Tute ne Mbalala (cassava & groundnuts, roasted)','1 cup (100g)',100,310,9,40,13,4,5,''),
+    food('Roasted Maize (corn on the cob)','1 ear (150g)',150,155,5,34,2,4,5,''),
+    food('Groundnuts, boiled (in shell)','1 cup (145g)',145,330,15,22,22,8,15,''),
+    food('Sweet Potato, boiled','100 g',100,86,1.6,20,0.1,3,6,''),
+
+    // --- Packaged Zambian brands (barcoded — actually sold retail) ---
+    food('BigTree Juice','1 cup (250ml)',250,120,0,30,0,0,15,'41234500134'),
+    food('Swiss Bake White Bread','1 slice (30g)',30,78,2.5,15,0.8,1,140,'41234500135'),
+    food('Yoyo Fun Snacks, cheese puffs','1 pack (25g)',25,130,1.5,14,8,0.3,210,'41234500136'),
+    food('Dairy Gold Milk, full cream','1 cup (250ml)',250,150,8,12,8,0,105,'41234500137'),
+    food('Parmalat Fresh Milk','1 cup (250ml)',250,148,8,11,8,0,100,'41234500138'),
+    food('Zammilk Yoghurt, plain','1 cup (245g)',245,150,9,17,4,0,120,'41234500139'),
+    food('Mosi Lager','1 bottle (330ml)',330,145,1,12,0,0,10,'41234500140'),
+    food('Chibuku Shake-Shake','500 ml',500,175,2,32,0.5,1,25,'41234500141'),
+    food('Rhino Lager','1 bottle (330ml)',330,140,1,11,0,0,10,'41234500142'),
+
+    // --- Restaurants in Zambia (prepared meals — no barcode) ---
+    food('Hungry Lion 2-Piece Chicken Meal','1 meal (350g)',350,720,38,55,38,4,1450,''),
+    food('Hungry Lion Zamba Winglets (6pc)','6 pieces (180g)',180,480,26,22,32,1,1100,''),
+    food('KFC Streetwise Two','1 meal (400g)',400,780,34,62,42,3,1600,''),
+    food('Debonairs Pizza, slice','1 slice (110g)',110,260,11,30,10,2,560,''),
+    food('Steers Burger, single','1 burger (200g)',200,480,24,40,25,2,780,''),
+    food("Nando's Quarter Chicken, peri-peri",'1 serving (220g)',220,380,38,3,23,0.5,980,''),
+    food('Galitos Quarter Chicken, flame-grilled','1 serving (220g)',220,360,37,2,21,0,900,''),
+    food("Roman's Pizza, slice",'1 slice (100g)',100,240,10,28,9,1.5,480,''),
+    food('Pizza Hut Pan Pizza, slice','1 slice (115g)',115,280,12,30,12,2,560,''),
+    food('Subway 6-inch Sub, chicken','1 sub (230g)',230,350,22,45,8,4,900,''),
+    food('Fishaways Fish & Chips','1 serving (350g)',350,720,28,68,38,4,980,''),
+    food("RocoMama's Burger",'1 burger (250g)',250,620,30,42,36,2,850,''),
+    food('Milky Lane Ice Cream Waffle','1 serving (180g)',180,520,7,68,24,1.5,220,''),
+  ];
+}
+
+function seedData(target){
+  target.exercises = seedExercises();
+  target.foods = seedFoods();
+  const findEx = n => target.exercises.find(e=>e.name===n).id;
+  target.routines = [
+    {id:uid(), name:'Push Day', notes:'Chest, shoulders, triceps', groups:[
+      [{exerciseId:findEx('Barbell Bench Press'), restSec:120}],
+      [{exerciseId:findEx('Overhead Press'), restSec:120}],
+      [{exerciseId:findEx('Incline Dumbbell Curl'), restSec:0},{exerciseId:findEx('Dumbbell Skullcrusher'), restSec:60}],
+      [{exerciseId:findEx('Cable Tricep Pushdown'), restSec:60}],
+    ]},
+    {id:uid(), name:'Pull Day', notes:'Back and biceps', groups:[
+      [{exerciseId:findEx('Conventional Deadlift'), restSec:150}],
+      [{exerciseId:findEx('Barbell Row'), restSec:120}],
+      [{exerciseId:findEx('Cable Lat Pulldown'), restSec:90}],
+      [{exerciseId:findEx('Dumbbell Curl'), restSec:60}],
+    ]},
+    {id:uid(), name:'Leg Day', notes:'Quads, hamstrings, glutes', groups:[
+      [{exerciseId:findEx('Barbell Back Squat'), restSec:150}],
+      [{exerciseId:findEx('Romanian Deadlift'), restSec:120}],
+      [{exerciseId:findEx('Leg Press'), restSec:90}],
+      [{exerciseId:findEx('Leg Extension'), restSec:0},{exerciseId:findEx('Leg Curl'), restSec:60}],
+    ]},
+  ];
+  // Backfill target sets/reps/weight/RPE prescriptions on the seeded routines
+  // above (they're written with just exerciseId+restSec for brevity) via the
+  // same migration path old user routines go through, so there's one source
+  // of truth for "what a routine exercise looks like".
+  target.routines.forEach(r=> r.groups.forEach(g=> g.forEach(item=> migrateRoutineItem(item, target.settings.restDefault))));
+  const findFood = n => target.foods.find(f=>f.name===n).id;
+  target.meals = [
+    {id:uid(), name:'High-Protein Breakfast', items:[
+      {foodId:findFood('Egg, large'), servings:3},
+      {foodId:findFood('Oats, dry'), servings:1},
+      {foodId:findFood('Blueberries'), servings:1},
+    ]},
+    {id:uid(), name:'Chicken & Rice Bowl', items:[
+      {foodId:findFood('Chicken Breast, cooked'), servings:1.5},
+      {foodId:findFood('Brown Rice, cooked'), servings:1.5},
+      {foodId:findFood('Broccoli, steamed'), servings:1},
+    ]},
+  ];
+}
+if(!DB.exercises || DB.exercises.length===0){ seedData(DB); save(); }
+
+/* =========================================================
+   Unit + calculation helpers
+   ========================================================= */
+function unitLabel(){ return DB.settings.units==='kg' ? 'kg' : 'lbs'; }
+function toDisplayWeight(lbsValue){ // internal storage is always lbs
+  return DB.settings.units==='kg' ? lbsValue*0.45359237 : lbsValue;
+}
+function fromDisplayWeight(displayValue){
+  return DB.settings.units==='kg' ? displayValue/0.45359237 : displayValue;
+}
+function roundWeight(n){ return Math.round(n*10)/10; }
+
+// Epley formula
+function estimate1RM(weight, reps){
+  if(!Number.isFinite(weight) || !Number.isFinite(reps) || reps<=0) return 0;
+  if(reps===1) return weight;
+  return weight * (1 + reps/30);
+}
+
+function plateBreakdown(targetWeightLbsDisplay, barWeight, availablePlates){
+  // availablePlates: array of plate weights in current display unit, descending
+  let remaining = (targetWeightLbsDisplay - barWeight)/2; // per side
+  if(remaining<=0) return [];
+  const used=[];
+  for(const p of availablePlates){
+    let count=0;
+    while(remaining+1e-6 >= p){ remaining -= p; count++; }
+    if(count>0) used.push({plate:p, count});
+  }
+  return used;
+}
+
+function warmupSets(workingWeight, workingReps){
+  // classic ramp: 40%x8-10, 60%x5, 80%x3
+  return [
+    {pct:0.4, weight: roundWeight(workingWeight*0.4), reps:8},
+    {pct:0.6, weight: roundWeight(workingWeight*0.6), reps:5},
+    {pct:0.8, weight: roundWeight(workingWeight*0.8), reps:3},
+  ];
+}
+
+function profileWeightLbs(){
+  const p = DB.settings.profile;
+  if(p.weightLbs) return p.weightLbs;
+  const sorted = [...DB.measurements].filter(m=>m.weight!=null).sort((a,b)=> new Date(a.date)-new Date(b.date));
+  return sorted.length? sorted[sorted.length-1].weight : null;
+}
+
+/* FEATURE 2: current/goal weight summary + 14-day sparkline for the dashboard card
+   and the "X to go" label on the Progress chart. All weights returned in lbs
+   (internal storage unit) — callers convert with toDisplayWeight() for display. */
+function weightSummary(){
+  const currentLbs = profileWeightLbs();
+  const goalLbs = DB.settings.profile.goalWeightLbs || null;
+  const cutoff = daysAgoISO(14);
+  const points = DB.measurements
+    .filter(m=> m.weight!=null && m.date>=cutoff)
+    .sort((a,b)=> new Date(a.date)-new Date(b.date))
+    .map(m=> ({x:new Date(m.date+'T00:00:00').getTime(), y:toDisplayWeight(m.weight)}));
+  let remaining = null, direction = null;
+  if(currentLbs!=null && goalLbs!=null){
+    remaining = Math.abs(toDisplayWeight(currentLbs) - toDisplayWeight(goalLbs));
+    direction = currentLbs > goalLbs ? 'lose' : (currentLbs < goalLbs ? 'gain' : 'there');
+  }
+  return { currentLbs, goalLbs, points, remaining, direction };
+}
+
+/* V26 Dashboard/Progress "snapshot" helper: how much bodyweight has changed
+   over a trailing window, using whatever measurements actually exist near
+   the window's edges (never interpolated/fabricated). Returns null when
+   there isn't a real prior data point to compare against — callers must
+   treat null as "not enough history yet", not as "no change". */
+function weightChangeSummary(days=30){
+  const withWeight = DB.measurements.filter(m=>m.weight!=null).sort((a,b)=> new Date(a.date)-new Date(b.date));
+  if(withWeight.length<2) return null;
+  const latest = withWeight[withWeight.length-1];
+  const cutoff = daysAgoISO(days);
+  // Closest entry at/before the cutoff date; if the whole history is newer
+  // than the window, fall back to the earliest entry on record so a user
+  // with e.g. 10 days of data still sees an honest (shorter) comparison.
+  let prior = null;
+  for(let i=withWeight.length-2;i>=0;i--){ if(withWeight[i].date<=cutoff){ prior = withWeight[i]; break; } }
+  if(!prior) prior = withWeight[0];
+  if(prior.id===latest.id) return null;
+  const deltaLbs = latest.weight - prior.weight;
+  return { deltaLbs, fromDate: prior.date, toDate: latest.date, spanDays: Math.round((new Date(latest.date)-new Date(prior.date))/86400000), baseWeightLbs: prior.weight };
+}
+
+/* Bounded-cost "was a PR set in the most recent workout" check — only looks
+   at the exercises actually performed in the single latest session (not the
+   whole exercise library), reusing computePRs() (the same source Stats
+   uses) rather than duplicating PR math. Returns null when there's no
+   session yet or nothing in it qualifies. */
+function recentPRHighlight(){
+  const sessions = [...DB.sessions].sort((a,b)=> (b.startedAt||0)-(a.startedAt||0) || new Date(b.date)-new Date(a.date));
+  const last = sessions[0];
+  if(!last) return null;
+  const seen = new Set();
+  let best = null;
+  (last.groups||[]).forEach(g=> g.forEach(entry=>{
+    if(entry.exType!=='weight_reps' || seen.has(entry.exerciseId)) return;
+    seen.add(entry.exerciseId);
+    const e = exById(entry.exerciseId);
+    if(!e) return;
+    const prs = computePRs(entry.exerciseId);
+    if(prs.best1RM<=0 || !prs.oneRMPoints.length) return;
+    const lastPoint = prs.oneRMPoints[prs.oneRMPoints.length-1];
+    if(lastPoint.date===last.date && lastPoint.value>=prs.best1RM){
+      if(!best || lastPoint.value>best.value) best = {name:e.name, value:lastPoint.value};
+    }
+  }));
+  return best;
+}
+
+/* V26 Progress "strength" snapshot: current best est. 1RM for the handful
+   of exercises actually trained most often, not the whole exercise
+   library. Bounded cost: one pass over sessions to rank by frequency, then
+   computePRs() (already O(sessions) each, same helper Stats uses) for only
+   the top `limit` exercises -- never every exercise ever logged. */
+function topStrengthHighlights(limit=3){
+  const freq = new Map();
+  DB.sessions.forEach(s=> (s.groups||[]).forEach(g=> g.forEach(entry=>{
+    if(entry.exType!=='weight_reps') return;
+    freq.set(entry.exerciseId, (freq.get(entry.exerciseId)||0)+1);
+  })));
+  const topIds = [...freq.entries()].sort((a,b)=>b[1]-a[1]).slice(0,limit).map(([id])=>id);
+  return topIds.map(id=>{
+    const e = exById(id);
+    if(!e) return null;
+    const prs = computePRs(id);
+    if(prs.best1RM<=0) return null;
+    return {id, name:e.name, best1RM:prs.best1RM};
+  }).filter(Boolean);
+}
+
+function computeBMR(){
+  const p = DB.settings.profile;
+  const wLbs = profileWeightLbs();
+  if(!wLbs || !p.heightCm || !p.age || !p.sex) return null;
+  const wKg = wLbs*0.45359237;
+  const base = 10*wKg + 6.25*p.heightCm - 5*p.age;
+  return Math.round(p.sex==='male' ? base+5 : base-161);
+}
+function computeTDEE(){
+  const bmr = computeBMR();
+  if(!bmr) return null;
+  return Math.round(bmr * (DB.settings.profile.activityLevel||1.375));
+}
+
+/* =========================================================
+   FEATURE 1: Smart calorie/protein goal calculator.
+   Weekly bodyweight-change rate by goal + intensity, converted to a
+   daily calorie surplus/deficit using ~7700 kcal per kg of bodyweight.
+   Lose rates match the spec exactly (0.25% / 0.5% / ~1%); gain rates
+   are intentionally smaller since lean-mass gain tolerates far less
+   surplus than fat loss tolerates deficit.
+   ========================================================= */
+const LOSE_RATE_PCT = { aggressive:0.01, normal:0.005, slow:0.0025 };
+const GAIN_RATE_PCT = { aggressive:0.005, normal:0.0025, slow:0.00125 };
+const KCAL_PER_KG = 7700;
+
+function computeGoalPlan(){
+  const p = DB.settings.profile;
+  const tdee = computeTDEE();
+  const bmr = computeBMR();
+  const wLbs = profileWeightLbs();
+  if(!tdee || !bmr || !wLbs) return null; // profile incomplete
+  const currentKg = wLbs*0.45359237;
+  const goalKg = p.goalWeightLbs ? p.goalWeightLbs*0.45359237 : null;
+  const goalType = p.goalType || 'maintain';
+  const intensity = p.intensity || 'normal';
+
+  let weeklyRateKg = 0, direction = 'maintain';
+  if(goalType==='lose'){ weeklyRateKg = currentKg*(LOSE_RATE_PCT[intensity]||LOSE_RATE_PCT.normal); direction='lose'; }
+  else if(goalType==='gain'){ weeklyRateKg = currentKg*(GAIN_RATE_PCT[intensity]||GAIN_RATE_PCT.normal); direction='gain'; }
+
+  const dailyDelta = Math.round(weeklyRateKg * KCAL_PER_KG / 7);
+  let targetCalories = tdee;
+  if(direction==='lose') targetCalories = Math.max(bmr, tdee - dailyDelta, 1200);
+  else if(direction==='gain') targetCalories = tdee + dailyDelta;
+  targetCalories = Math.round(targetCalories);
+
+  const refKg = goalKg || currentKg;
+  const proteinPerKg = direction==='lose' ? 2.0 : (direction==='gain' ? 1.7 : 1.8);
+  const proteinGrams = Math.round(refKg * proteinPerKg);
+
+  let weeksToGoal = null;
+  if(goalKg!=null && weeklyRateKg>0){
+    weeksToGoal = Math.round(Math.abs(goalKg-currentKg) / weeklyRateKg);
+  }
+
+  return { bmr, tdee, currentKg, goalKg, goalType, intensity, direction, dailyDelta, targetCalories, proteinGrams, weeksToGoal };
+}
+
+/* =========================================================
+   Router
+   ========================================================= */
+let currentTab = 'dashboard';
+const renderers = {}; // tab -> function
+
+/* Each `.screen` div is its own scroll container (overflow-y:auto), and at
+   some viewport/content-height combinations the outer page scrolls instead
+   (when a screen's content is short enough that it never actually overflows
+   its own box). window.scrollTo(0,0) only resets the latter, so on its own
+   it silently fails to reset scroll for whichever screen is currently the
+   real scroll container — this resets both, and only on genuine navigation
+   (never from an in-place rerender), so a set check/tag/add doesn't yank the
+   user's scroll position around mid-workout. */
+function resetScreenScroll(tab){
+  const el = document.getElementById('screen-'+tab);
+  if(el) el.scrollTop = 0;
+  window.scrollTo(0,0);
+  if(el) playScreenEnter(el);
+}
+/* Very short, subtle fade+rise on genuine screen/subview navigation only —
+   restarted via a reflow trick since re-adding the same class name while
+   already present would otherwise not replay the CSS animation. Respects
+   prefers-reduced-motion via the global rule that zeroes animation-duration. */
+function playScreenEnter(el){
+  el.classList.remove('screen-enter');
+  void el.offsetWidth;
+  el.classList.add('screen-enter');
+}
+
+function setTab(tab){
+  currentTab = tab;
+  $$('.tab-btn').forEach(b=> b.classList.toggle('active', b.dataset.tab===tab));
+  ['dashboard','workout','nutrition','progress'].forEach(t=>{
+    $('#screen-'+t).classList.toggle('hidden', t!==tab);
+  });
+  renderCurrent();
+  resetScreenScroll(tab);
+}
+
+function renderCurrent(){
+  if(renderers[currentTab]) renderers[currentTab]();
+}
+
+function rerender(){ renderCurrent(); }
+
+$$('.tab-btn').forEach(b=> b.addEventListener('click', ()=> setTab(b.dataset.tab)));
+
+function updateTopDate(){
+  $('#topDate').textContent = new Date().toLocaleDateString(undefined,{weekday:'short', month:'short', day:'numeric'});
+}
+
+/* =========================================================
+   Gauge signature element (console/tachometer style)
+   ========================================================= */
+function gaugeSVG(pct, color, size=100){
+  pct = clamp(pct,0,999);
+  const r = size/2 - 10;
+  const cx = size/2, cy = size/2;
+  const circumference = 2*Math.PI*r;
+  const shown = clamp(pct,0,100);
+  const dash = circumference * shown/100;
+  const over = pct>100;
+  let ticks='';
+  const tickCount=30;
+  for(let i=0;i<tickCount;i++){
+    const a = (i/tickCount)*2*Math.PI - Math.PI/2;
+    const inner = r-1, outer = r-6;
+    const x1 = cx + inner*Math.cos(a), y1 = cy + inner*Math.sin(a);
+    const x2 = cx + outer*Math.cos(a), y2 = cy + outer*Math.sin(a);
+    ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="var(--surface-3)" stroke-width="1.4"/>`;
+  }
+  return `
+  <svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">
+    ${ticks}
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--surface-2)" stroke-width="7"/>
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${over?'var(--red)':color}" stroke-width="7"
+      stroke-dasharray="${dash.toFixed(1)} ${circumference.toFixed(1)}" stroke-linecap="round"
+      transform="rotate(-90 ${cx} ${cy})"/>
+  </svg>`;
+}
+
+function gaugeBlock(pct, value, label, cap, color){
+  return `<div class="gauge-wrap">
+    <div style="position:relative;">
+      ${gaugeSVG(pct,color,100)}
+      <div class="gauge-num"><div class="val mono">${escapeHtml(value)}</div><div class="lbl">${escapeHtml(label)}</div></div>
+    </div>
+    <div class="gauge-cap">${escapeHtml(cap)}</div>
+  </div>`;
+}
+
+/* =========================================================
+   Data query helpers
+   ========================================================= */
+function foodById(id){ return DB.foods.find(f=>f.id===id); }
+// Most-recently-logged distinct foods, newest first (based on log entry order, not diary date —
+// so it reflects what you actually tapped most recently, even if backdated to an earlier day).
+function recentFoodIds(limit=8){
+  const seen = new Set();
+  const ids = [];
+  for(let i=DB.foodLogs.length-1; i>=0 && ids.length<limit; i--){
+    const id = DB.foodLogs[i].foodId;
+    if(!seen.has(id) && foodById(id)){ seen.add(id); ids.push(id); }
+  }
+  return ids;
+}
+// How many times each food has actually been logged -- the single source of
+// truth for "frequent" used both by the empty-query browse list below and,
+// as of V27, to rank active search results (a plain substring filter had no
+// ordering at all beyond DB.foods' insertion order).
+function foodLogCounts(){
+  const counts = new Map();
+  DB.foodLogs.forEach(l=>{ if(foodById(l.foodId)) counts.set(l.foodId, (counts.get(l.foodId)||0)+1); });
+  return counts;
+}
+// Foods logged most often, most-frequent first. Ties broken by most-recent use.
+function frequentFoodIds(limit=8){
+  return [...foodLogCounts().entries()].sort((a,b)=> b[1]-a[1]).slice(0,limit).map(e=>e[0]);
+}
+// V27: orders a set of already text-matched foods the same way the
+// empty-query browse list already prioritizes them (favorites, then how
+// often you actually log it) instead of leaving search results in
+// DB.foods' arbitrary insertion order. Array.sort is stable, so foods with
+// no log history at all keep their original relative order as the final
+// tiebreak -- this only ever reorders toward foods the user actually uses.
+function rankFoodsForSearch(foods){
+  const counts = foodLogCounts();
+  return [...foods].sort((a,b)=>{
+    const favDiff = (b.favorite?1:0) - (a.favorite?1:0);
+    if(favDiff) return favDiff;
+    return (counts.get(b.id)||0) - (counts.get(a.id)||0);
+  });
+}
+function exById(id){ return DB.exercises.find(e=>e.id===id); }
+function routineById(id){ return DB.routines.find(r=>r.id===id); }
+function programById(id){ return DB.programs.find(p=>p.id===id); }
+
+/* =========================================================
+   V28: Programs (Program -> Week -> Workout -> Routine)
+   ========================================================= */
+// Ordered list of every workout slot in a program, across all weeks, in
+// the order they're meant to be done. This single flattening is the basis
+// for both "what's next" and "% complete" -- there's no separate stored
+// index to drift out of sync.
+function flattenProgramWeeks(program){
+  const flat = [];
+  (program.weeks||[]).forEach((w,wi)=>{
+    (w.routineIds||[]).forEach((rid,ri)=>{
+      flat.push({weekIndex:wi, weekNumber:wi+1, phase:w.phase||null, routineId:rid, workoutIndexInWeek:ri});
+    });
+  });
+  return flat;
+}
+// Derives current position entirely from DB.sessions -- never from a
+// separately-stored "current week" -- so a missed workout, an edited
+// program, or a workout logged out of order can never leave stale state
+// behind, and the same completed session can never double-count (it's
+// counted by simply filtering DB.sessions by programId once).
+function programPosition(program){
+  if(!program) return null;
+  const flat = flattenProgramWeeks(program);
+  const totalWorkouts = flat.length;
+  const completedCount = DB.sessions.filter(s=> s.programId===program.id).length;
+  const pct = totalWorkouts>0 ? clamp(Math.round(completedCount/totalWorkouts*100),0,100) : 0;
+  const complete = totalWorkouts>0 && completedCount>=totalWorkouts;
+  const next = !complete ? flat[completedCount] : null;
+  const lastWeek = program.weeks && program.weeks.length ? program.weeks[program.weeks.length-1] : null;
+  return {
+    totalWorkouts, completedCount, pct, complete,
+    next,
+    nextRoutine: next ? routineById(next.routineId) : null,
+    currentWeekNumber: next ? next.weekNumber : (program.weeks||[]).length,
+    currentPhase: next ? next.phase : (lastWeek ? lastWeek.phase||null : null)
+  };
+}
+function newProgramDraft(){
+  return { id:null, name:'', description:'', weeks:[] };
+}
+function mealById(id){ return DB.meals.find(m=>m.id===id); }
+
+function dayFoodLogs(date){ return DB.foodLogs.filter(l=>l.date===date); }
+// Most recent time this food was logged (any date), newest first — used to
+// default a fresh log's amount to "however much you usually have" instead of
+// the food's default serving, so re-logging a familiar food is a real repeat.
+function mostRecentLogForFood(foodId){
+  for(let i=DB.foodLogs.length-1;i>=0;i--){ if(DB.foodLogs[i].foodId===foodId) return DB.foodLogs[i]; }
+  return null;
+}
+
+/* =========================================================
+   FIX #6: flexible food-amount helpers.
+   A food log entry is either:
+     {amountType:'serving', amount:<multiplier of the food's default serving>}
+     {amountType:'grams',   amount:<grams>}
+   Old entries only ever had {servings:n} — treated as amountType 'serving'
+   for backward compatibility with previously-saved data.
+   ========================================================= */
+function logAmountType(log){ return log.amountType || 'serving'; }
+function logAmountValue(log){ return log.amount!=null ? log.amount : (log.servings!=null ? log.servings : 1); }
+function logMultiplier(log, f){
+  if(!f) return 0;
+  if(logAmountType(log)==='grams'){
+    if(!f.servingGrams || f.servingGrams<=0) return 0; // can't convert without a gram basis
+    return logAmountValue(log) / f.servingGrams;
+  }
+  return logAmountValue(log);
+}
+function logMacros(log){
+  const f = foodById(log.foodId);
+  const mult = logMultiplier(log, f);
+  if(!f) return {calories:0,protein:0,carbs:0,fat:0,fiber:0,sodium:0};
+  return {
+    calories: f.calories*mult, protein: f.protein*mult, carbs: f.carbs*mult,
+    fat: f.fat*mult, fiber: (f.fiber||0)*mult, sodium: (f.sodium||0)*mult
+  };
+}
+function logLabel(log){
+  const f = foodById(log.foodId);
+  if(!f) return 'Unknown food';
+  const amt = logAmountValue(log);
+  if(logAmountType(log)==='grams') return `${fmt1(amt)} g ${f.name}`;
+  if(Math.abs(amt-1)<0.001) return `${f.servingLabel} ${f.name}`;
+  return `${fmt1(amt)} × ${f.servingLabel} ${f.name}`;
+}
+
+function computeDayTotals(date){
+  const logs = dayFoodLogs(date);
+  const t = {calories:0,protein:0,carbs:0,fat:0,fiber:0,sodium:0};
+  logs.forEach(l=>{
+    const m = logMacros(l);
+    t.calories += m.calories; t.protein += m.protein; t.carbs += m.carbs;
+    t.fat += m.fat; t.fiber += m.fiber; t.sodium += m.sodium;
+  });
+  // add activity calories burned (workouts + manual activity logs)
+  let burned = 0;
+  DB.sessions.filter(s=>s.date===date).forEach(s=> burned += estimateSessionCalories(s));
+  DB.activityLogs.filter(a=>a.date===date).forEach(a=> burned += a.calories);
+  t.burned = burned;
+  return t;
+}
+
+function estimateSessionCalories(session){
+  // rough estimate: 5.2 kcal/min for strength work, or the explicitly logged
+  // calories for cardio sets — never both for the same time. A cardio set
+  // with logged calories also "covers" its own logged duration, which is
+  // subtracted from the total session time before the flat per-minute
+  // strength estimate is applied, so that time isn't counted twice.
+  let cardioKcal = 0;
+  let coveredSec = 0;
+  (session.groups||[]).forEach(g=> g.forEach(ex=>{
+    if(ex.exType!=='cardio') return;
+    (ex.sets||[]).forEach(s=>{
+      if(!s.done || !s.calories) return; // no explicit calories logged — leave this time for the flat estimate below
+      cardioKcal += s.calories;
+      coveredSec += s.durationSec || 0;
+    });
+  }));
+  const totalMin = session.durationMin || 0;
+  const remainingMin = Math.max(0, totalMin - coveredSec/60);
+  return Math.round(cardioKcal + remainingMin*5.2);
+}
+
+function waterCups(date){ return DB.waterLogs[date]||0; }
+
+function mondayOf(iso){
+  const d = new Date(iso+'T00:00:00');
+  const day = d.getDay(); // 0=Sun
+  const diff = day===0 ? -6 : 1-day;
+  d.setDate(d.getDate()+diff);
+  return localISODate(d);
+}
+// isLoggedFn defaults to "has a workout session" for the Dashboard's strip;
+// the Nutrition Diary passes a food-log check instead, since a workout day
+// isn't a meaningful "logged" signal on a nutrition screen.
+function weekDayStripHTML(selectedDate, isLoggedFn){
+  const monday = mondayOf(todayISO());
+  const labels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const today = todayISO();
+  const checkLogged = isLoggedFn || (iso=> DB.sessions.some(s=>s.date===iso));
+  return `<div class="day-strip">${labels.map((lbl,i)=>{
+    const iso = shiftDate(monday,i);
+    const logged = checkLogged(iso);
+    const isToday = iso===today;
+    const isSel = iso===selectedDate;
+    const dNum = new Date(iso+'T00:00:00').getDate();
+    return `<div class="day-pill ${isToday?'today':''} ${logged?'logged':''}" data-day="${iso}" style="cursor:pointer;${isSel?'border-color:var(--blue);':''}">
+      <div class="dp-d">${lbl}</div><div class="dp-n mono">${dNum}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+/* V27: local-first + no cloud sync means a lost/reset device is total data
+   loss, so a stale-backup nudge is the highest-value safety net available.
+   Never nags a genuinely new install (no data worth losing yet), and only
+   fires once per app boot from INIT, not on every render. */
+function needsBackupNudge(){
+  const meaningful = DB.sessions.length>=3 || DB.measurements.length>=3 || DB.foodLogs.length>=10;
+  if(!meaningful) return false;
+  const last = DB.settings.lastExportedAt;
+  if(!last) return true;
+  const daysSince = (Date.now() - new Date(last).getTime()) / 86400000;
+  return daysSince > 30;
+}
+
+function computeStreak(){
+  let streak=0;
+  let d = new Date();
+  for(let i=0;i<400;i++){
+    const iso = localISODate(d);
+    const has = DB.sessions.some(s=>s.date===iso);
+    if(has){ streak++; d.setDate(d.getDate()-1); }
+    else if(iso===todayISO()){ d.setDate(d.getDate()-1); continue; }
+    else break;
+  }
+  return streak;
+}
+
+/* Longest historical run of consecutive training days, across all logged
+   sessions — distinct from computeStreak() which only reports the CURRENT
+   run ending today. */
+function computeBestStreak(){
+  const days = Array.from(new Set(DB.sessions.map(s=>s.date))).sort();
+  if(days.length===0) return 0;
+  let best=1, cur=1;
+  for(let i=1;i<days.length;i++){
+    const prev = new Date(days[i-1]+'T00:00:00');
+    const next = new Date(days[i]+'T00:00:00');
+    const diffDays = Math.round((next-prev)/86400000);
+    cur = diffDays===1 ? cur+1 : 1;
+    best = Math.max(best, cur);
+  }
+  return best;
+}
+/* Working sets (see isWorkingSet — warm-ups excluded) performed per exercise
+   category over the last `days` days, for a simple muscle-group balance view. */
+/* endDaysAgo shifts the whole `days`-long window into the past (0 = ending
+   today, `days` = the equal-length window immediately before that one) --
+   lets V27's Progress trend compare "this period" vs "the period before
+   it" using the exact same counting logic Stats already relies on for
+   "this week", instead of a second parallel implementation. */
+function muscleGroupSetCounts(days, endDaysAgo=0){
+  const end = daysAgoISO(endDaysAgo);
+  const cutoff = daysAgoISO(endDaysAgo + days - 1);
+  const counts = {};
+  DB.sessions.filter(s=> s.date>=cutoff && s.date<=end).forEach(s=>{
+    (s.groups||[]).forEach(g=> g.forEach(entry=>{
+      const e = exById(entry.exerciseId);
+      const cat = e ? e.category : 'Other';
+      const working = (entry.sets||[]).filter(isWorkingSet).length;
+      if(working>0) counts[cat] = (counts[cat]||0) + working;
+    }));
+  });
+  return Object.entries(counts).sort((a,b)=> b[1]-a[1]);
+}
+
+function daysAgoISO(n){ const d = new Date(); d.setDate(d.getDate()-n); return localISODate(d); }
+/* Single definition of "This Week" used everywhere in the app: a rolling
+   7-day window that includes today and the 6 days before it (NOT today +
+   7 previous days, which would silently make every "week" an 8-day span).
+   Dashboard, workout stats and progress stats must all call this — do not
+   compute an ad-hoc cutoff elsewhere. */
+const THIS_WEEK_DAYS = 7;
+function thisWeekCutoffISO(){ return daysAgoISO(THIS_WEEK_DAYS-1); }
+function weekVolume(){
+  const cutoff = thisWeekCutoffISO(); // string comparison works because YYYY-MM-DD sorts lexicographically
+  let vol=0;
+  DB.sessions.filter(s=> s.date>=cutoff).forEach(s=> vol += sessionVolume(s));
+  return vol;
+}
+
+/* A set counts toward volume/PRs only once it's marked done AND isn't tagged
+   Warmup — warm-up sets are deliberately excluded so they can't inflate
+   working-set volume, PR calculations or strength trend charts (see the
+   PR/1RM audit: warm-up sets must never masquerade as working performance). */
+function isWorkingSet(set){ return !!set.done && set.tag!=='Warmup'; }
+
+function sessionVolume(session){
+  let v=0;
+  (session.groups||[]).forEach(g=>g.forEach(ex=>{
+    (ex.sets||[]).forEach(s=>{
+      if(isWorkingSet(s) && Number.isFinite(s.weight) && Number.isFinite(s.reps)) v += (s.weight*s.reps);
+    });
+  }));
+  return v;
+}
+
+/* Picks the routine to feature on the dashboard hero card: the one performed
+   least-recently-first among ones with history, falling back to the first
+   defined routine so the card is always actionable once templates exist. */
+function suggestedRoutine(){
+  if(DB.routines.length===0) return null;
+  const withStats = DB.routines.map(r=>({r, st:templateStats(r.id)}));
+  withStats.sort((a,b)=>{
+    if(!a.st.lastDate && !b.st.lastDate) return 0;
+    if(!a.st.lastDate) return -1;
+    if(!b.st.lastDate) return 1;
+    return a.st.lastDate<b.st.lastDate? -1:1;
+  });
+  return withStats[0].r;
+}
+function recentActivityHtml(){
+  const items = [];
+  [...DB.sessions].sort((a,b)=>b.startedAt-a.startedAt).slice(0,3).forEach(s=>{
+    items.push({sortKey:s.startedAt, bg:'var(--blue-dim)', fg:'var(--blue-tint)', icon:'W', title:s.routineName, sub:(s.durationMin||'—')+' min · '+fmtInt(toDisplayWeight(sessionVolume(s)))+' '+unitLabel()+' vol', when:dateLabel(s.date), kind:'session', sessId:s.id});
+  });
+  [...DB.activityLogs].slice(-3).forEach((a,i)=>{
+    items.push({sortKey: new Date(a.date).getTime()+i, bg:'var(--surface-3)', fg:'var(--ember)', icon:'A', title:a.label, sub:a.minutes+' min · '+a.calories+' kcal', when:dateLabel(a.date), kind:'activity', actDate:a.date});
+  });
+  items.sort((a,b)=>b.sortKey-a.sortKey);
+  const top = items.slice(0,4);
+  if(top.length===0) return `<div class="sub" style="padding:4px 0;">Nothing logged yet — finish a workout or log activity to see it here.</div>`;
+  // Recent items are tappable: a workout jumps straight to its session detail,
+  // an activity log jumps to the Fuel Activity screen for that day — so
+  // "Recent" is a shortcut back into what you logged, not just a readout.
+  return top.map(r=>`<div class="list-row" data-recent="${r.kind}" data-recent-sess="${r.sessId||''}" data-recent-date="${r.actDate||''}" style="border-top:1px solid var(--line);border-bottom:none;padding:11px 0;cursor:pointer;">
+    <div style="width:34px;height:34px;border-radius:10px;background:${r.bg};display:flex;align-items:center;justify-content:center;flex:none;font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:11px;color:${r.fg};letter-spacing:.04em;">${r.icon}</div>
+    <div class="lr-main"><div class="lr-title">${escapeHtml(r.title)}</div><div class="lr-sub">${escapeHtml(r.sub)}</div></div>
+    <div class="mono" style="font-size:11.5px;color:var(--faint-2);flex:none;">${escapeHtml(r.when)}</div>
+  </div>`).join('');
+}
+
+/* =========================================================
+   DASHBOARD
+   ========================================================= */
+renderers.dashboard = function(){
+  const date = todayISO();
+  const totals = computeDayTotals(date);
+  const goals = DB.settings.goals;
+  const remaining = Math.max(0, goals.calories - totals.calories + (totals.burned||0));
+  const calPct = (totals.calories/goals.calories)*100;
+  const water = waterCups(date);
+  const waterPct = (water/goals.water)*100;
+  const streak = computeStreak();
+  // A day can have more than one completed workout (e.g. an AM and a PM
+  // session) — .find() would silently show only the first and ignore the
+  // rest, so gather all of today's sessions and aggregate across them.
+  const todaySessions = DB.sessions.filter(s=>s.date===date);
+  const todaySession = todaySessions[0] || null; // kept for the single-session display case below
+  const vol = todaySessions.reduce((sum,s)=> sum + sessionVolume(s), 0);
+  const volPct = clamp((vol/8000)*100,0,100) || (todaySessions.length?100:0);
+  const weight = weightSummary();
+  const weightChange = weightChangeSummary(30);
+  const recentPR = recentPRHighlight();
+  const active = DB.activeSession;
+  const suggested = suggestedRoutine();
+  const weekWorkoutCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
+  // V28: when the user is following a program, its "what's next" takes over
+  // the existing suggested-workout hero slot instead of a separate card --
+  // programPosition() derives everything from real completed sessions, so
+  // this can never show a stale/hand-tracked week number.
+  const activeProgramEntry = DB.settings.activeProgram;
+  const activeProgram = activeProgramEntry ? programById(activeProgramEntry.programId) : null;
+  const programPos = activeProgram ? programPosition(activeProgram) : null;
+
+  const macroRow = (label,val,goal,color)=>{
+    const pct = clamp((val/goal)*100,0,100);
+    return `<div class="macro-line">
+      <div class="m-lbl">${label}</div>
+      <div class="pbar ${color}"><div style="width:${pct}%"></div></div>
+      <div class="m-val">${fmtInt(val)} / ${fmtInt(goal)}g</div>
+    </div>`;
+  };
+
+  let heroHtml;
+  if(active){
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div class="hero-eyebrow">Workout in progress</div>
+      <div class="hero-title">${escapeHtml(active.routineName)}</div>
+      <div class="hero-meta">Started ${Math.max(0,Math.floor((Date.now()-active.startedAt)/60000))} min ago</div>
+      <button class="btn btn-primary btn-block" id="resumeWorkout" style="margin-top:13px;">Resume Workout</button>
+    </div></div>`;
+  } else if(todaySessions.length){
+    const totalMin = todaySessions.reduce((sum,s)=> sum + (s.durationMin||0), 0);
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div class="hero-eyebrow" style="color:var(--green);">Done for today</div>
+      <div class="hero-title">${todaySessions.length>1? todaySessions.length+' Workouts Completed' : escapeHtml(todaySession.routineName)}</div>
+      <div class="hero-meta">${totalMin||'—'} min · ${fmtInt(toDisplayWeight(vol))} ${unitLabel()} volume logged</div>
+      <button class="btn btn-block" id="viewTodaySession" style="margin-top:13px;">${todaySessions.length>1? 'View Workouts' : 'View Workout'}</button>
+    </div></div>`;
+  } else if(activeProgram && programPos && programPos.complete){
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div class="hero-eyebrow" style="color:var(--green);">Program complete</div>
+      <div class="hero-title">Nice work!</div>
+      <div class="hero-meta">You finished all ${programPos.totalWorkouts} workouts in ${escapeHtml(activeProgram.name)}. Add more weeks or start something new.</div>
+      <button class="btn btn-primary btn-block" id="viewCompletedProgram" style="margin-top:13px;">View Program</button>
+    </div></div>`;
+  } else if(activeProgram && programPos && programPos.nextRoutine){
+    // V29: name/week/phase/progress now live in the Current Program card
+    // above -- this card's only job is "next workout" as a distinct,
+    // focused action, matching the reference design's two-card split.
+    const nr = programPos.nextRoutine;
+    const exCount = nr.groups.reduce((n,g)=>n+g.length,0);
+    const estMin = Math.max(20, nr.groups.length*9);
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+        <div style="min-width:0;">
+          <div class="hero-eyebrow">Next Workout</div>
+          <div class="hero-title">${escapeHtml(nr.name)}</div>
+          <div class="hero-meta">Today · ${exCount} exercise${exCount!==1?'s':''}</div>
+        </div>
+        <div style="text-align:right;flex:none;">
+          <div class="mono" style="font-size:22px;font-weight:600;">${estMin}</div>
+          <div style="font-size:9.5px;color:var(--faint-2);letter-spacing:.08em;text-transform:uppercase;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">est min</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-primary" id="startProgramNext" style="flex:1;">Start Workout</button>
+        <button class="btn" id="heroProgram" style="flex:none;width:52px;">≡</button>
+      </div>
+    </div></div>`;
+  } else if(suggested){
+    const st = templateStats(suggested.id);
+    const exNames = suggested.groups.flatMap(g=>g.map(it=>{ const e=exById(it.exerciseId); return e?e.name:null; })).filter(Boolean).slice(0,5);
+    const estMin = Math.max(20, suggested.groups.length*9);
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+        <div style="min-width:0;">
+          <div class="hero-eyebrow">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Suggested for today'}</div>
+          <div class="hero-title">${escapeHtml(suggested.name)}</div>
+          <div class="hero-meta">${suggested.groups.length} exercise${suggested.groups.length!==1?'s':''}</div>
+        </div>
+        <div style="text-align:right;flex:none;">
+          <div class="mono" style="font-size:22px;font-weight:600;">${estMin}</div>
+          <div style="font-size:9.5px;color:var(--faint-2);letter-spacing:.08em;text-transform:uppercase;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">est min</div>
+        </div>
+      </div>
+      <div class="hero-tags">${exNames.map(n=>`<span>${escapeHtml(n)}</span>`).join('')}</div>
+      <div class="row">
+        <button class="btn btn-primary" id="startSuggested" style="flex:1;">Start Workout</button>
+        <button class="btn" id="heroRoutines" style="flex:none;width:52px;">≡</button>
+      </div>
+    </div></div>`;
+  } else {
+    heroHtml = `<div class="hero-card"><div class="hero-card-in">
+      <div class="hero-eyebrow">Get started</div>
+      <div class="hero-title">Build your first routine</div>
+      <div class="hero-meta">Or jump straight into an empty workout and build it as you go.</div>
+      <button class="btn btn-primary btn-block" id="startEmptyHero" style="margin-top:13px;">Start Empty Workout</button>
+    </div></div>`;
+  }
+
+  // V29: a compact, tappable "Current Program" summary card -- separate
+  // from the hero below so "which program am I following" and "what's my
+  // very next action" read as two distinct pieces of information instead
+  // of being blended into one card. Purely visual: activeProgram/programPos
+  // are the same values the hero branches below already compute.
+  const currentProgramCardHtml = (activeProgram && programPos) ? `
+    <div class="card" id="currentProgramCard" style="cursor:pointer;display:flex;align-items:center;gap:12px;">
+      <div class="icon-badge" style="background:rgba(59,209,130,0.14);color:var(--green);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9-6.3 3.9 1.7-7-5.4-4.7 7.1-.6z"/></svg>
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;"><span class="card-title" style="margin:0;">Current Program</span><span class="badge-active">Active</span></div>
+        <div style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:16px;text-transform:uppercase;letter-spacing:.01em;margin-top:2px;">${escapeHtml(activeProgram.name)}</div>
+        <div class="sub" style="margin-top:1px;">${programPos.complete? 'Complete' : `Week ${programPos.currentWeekNumber} of ${activeProgram.weeks.length}`}${programPos.currentPhase?' · '+escapeHtml(programPos.currentPhase):''}</div>
+        <div class="pbar green" style="margin-top:8px;"><div style="width:${programPos.pct}%"></div></div>
+      </div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" style="flex:none;"><path d="M9 18l6-6-6-6"/></svg>
+    </div>
+  ` : '';
+
+  const QUICK_NAV_TILES = [
+    {label:'Workouts', sub:DB.routines.length+' routines', color:'#B073F0', bg:'rgba(176,115,240,0.14)', tab:'workout', icon:'<path d="M6.5 6.5l11 11"/><path d="M4 9l3-3 2.5 2.5-3 3zM20 15l-3 3-2.5-2.5 3-3z"/>'},
+    {label:'Nutrition', sub:'Track food', color:'var(--green)', bg:'rgba(59,209,130,0.14)', tab:'nutrition', icon:'<path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 2v3M10 2v3M14 2v3"/>'},
+    {label:'Progress', sub:'See your trends', color:'var(--ember)', bg:'rgba(245,154,75,0.14)', tab:'progress', icon:'<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>'},
+    {label:'Programs', sub:'Manage plans', color:'#F06AA6', bg:'rgba(240,106,166,0.14)', tab:'workout', wk:'programs', icon:'<path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9-6.3 3.9 1.7-7-5.4-4.7 7.1-.6z"/>'}
+  ];
+  const quickNavHtml = `<div class="tile-grid">${QUICK_NAV_TILES.map((t,i)=>`
+    <button class="tile" data-qnav="${i}">
+      <div class="icon-badge icon-badge-sm" style="background:${t.bg};color:${t.color};"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${t.icon}</svg></div>
+      <div><div class="tile-lbl">${escapeHtml(t.label)}</div><div class="tile-sub">${escapeHtml(t.sub)}</div></div>
+    </button>`).join('')}</div>`;
+
+  $('#screen-dashboard').innerHTML = `
+    <div class="screen-head">
+      <h1>Today</h1>
+      <div class="sub">${dateLabel(date)} · ${streak>0? streak+'-day streak':"Let's start a streak"}</div>
+    </div>
+
+    ${weekDayStripHTML(date)}
+
+    ${currentProgramCardHtml}
+
+    ${heroHtml}
+
+    ${quickNavHtml}
+
+    <button class="btn btn-ember btn-block" id="qsFood" style="margin-bottom:12px;">Log Food</button>
+
+    <div class="card">
+      <div class="card-title">Daily Console <span class="tick">${escapeHtml(date)}</span></div>
+      <div class="gauge-row">
+        ${gaugeBlock(calPct, fmtInt(remaining), 'KCAL LEFT', 'Calories', 'var(--ember)')}
+        ${gaugeBlock(waterPct, water+'/'+goals.water, 'CUPS', 'Water', 'var(--blue)')}
+        ${gaugeBlock(volPct, todaySessions.length? fmtInt(toDisplayWeight(vol)): '0', unitLabel().toUpperCase()+'·REPS', todaySessions.length? 'Logged':'No workout', 'var(--green)')}
+      </div>
+      <div class="water-quickadd-row">
+        <span class="water-quickadd-lbl">+ Water</span>
+        ${[1,2,3].map(n=>`<button class="btn btn-ghost btn-sm water-add" data-n="${n}">+${n}</button>`).join('')}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Macros</div>
+      ${macroRow('Protein', totals.protein, goals.protein, 'blue')}
+      ${macroRow('Carbs', totals.carbs, goals.carbs, 'ember')}
+      ${macroRow('Fat', totals.fat, goals.fat, 'green')}
+      ${DB.settings.netCarbMode ? `<div style="font-size:11.5px;color:var(--muted);margin-top:6px;">Net carbs: <span class="mono">${fmtInt(Math.max(0,totals.carbs-totals.fiber))}g</span></div>` : ''}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Weight</div>
+      <div style="display:flex;align-items:center;gap:14px;">
+        <div style="flex:1;">
+          <div class="stat-grid">
+            <div class="stat-box"><div class="sv">${weight.currentLbs!=null? fmt1(toDisplayWeight(weight.currentLbs)) : '—'}</div><div class="sl">Current (${unitLabel()})</div></div>
+            <div class="stat-box"><div class="sv">${weight.goalLbs!=null? fmt1(toDisplayWeight(weight.goalLbs)) : '—'}</div><div class="sl">Goal (${unitLabel()})</div></div>
+          </div>
+          ${weight.remaining!=null ? `<div class="sub" style="margin-top:8px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction}`}</div>` : `<div class="sub" style="margin-top:8px;">Set a goal weight in Settings → Profile</div>`}
+          ${weightChange ? `<div class="sub" style="margin-top:2px;">${weightChange.deltaLbs===0?'No change':`${weightChange.deltaLbs>0?'+':'-'}${fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))} ${unitLabel()}`} over the last ${weightChange.spanDays} day${weightChange.spanDays===1?'':'s'}</div>` : ''}
+        </div>
+        <div>${sparklineSVG(weight.points, 'var(--blue)')}</div>
+      </div>
+      <button class="btn btn-primary btn-block" id="logWeightBtn" style="margin-top:10px;">Log Today's Weight</button>
+      <div class="week-summary-row">
+        <span class="week-summary-lbl">This week</span>
+        <span class="week-summary-val">${fmtInt(toDisplayWeight(weekVolume()))} ${unitLabel()} · ${weekWorkoutCount} workout${weekWorkoutCount===1?'':'s'}</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Recent${recentPR ? ` <span class="chip pr">PR · ${escapeHtml(recentPR.name)}</span>` : ''}</div>
+      ${recentActivityHtml()}
+    </div>
+  `;
+  $('#qsFood').addEventListener('click', ()=> { setTab('nutrition'); openFoodPicker(todayISO(),'Snacks'); });
+  $('#logWeightBtn').addEventListener('click', openQuickWeightModal);
+  const resumeBtn = $('#resumeWorkout');
+  if(resumeBtn) resumeBtn.addEventListener('click', ()=>{ wk.view='active-session'; setTab('workout'); });
+  const viewTodayBtn = $('#viewTodaySession');
+  if(viewTodayBtn) viewTodayBtn.addEventListener('click', ()=>{
+    setTab('workout');
+    // Multiple sessions today -> there's no single one to jump to, so show
+    // the list (History) rather than silently picking just one of them.
+    if(todaySessions.length>1) wkNav('history');
+    else wkNav('session-detail', {historyDate: todaySession.id});
+  });
+  const startSuggestedBtn = $('#startSuggested');
+  if(startSuggestedBtn) startSuggestedBtn.addEventListener('click', ()=>{ setTab('workout'); startSession(suggested.id); });
+  const heroRoutinesBtn = $('#heroRoutines');
+  if(heroRoutinesBtn) heroRoutinesBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('routines'); });
+  const startProgramNextBtn = $('#startProgramNext');
+  if(startProgramNextBtn) startProgramNextBtn.addEventListener('click', ()=>{
+    setTab('workout');
+    startSession(programPos.next.routineId, {programId:activeProgram.id, programName:activeProgram.name, weekNumber:programPos.currentWeekNumber, phase:programPos.currentPhase});
+  });
+  const heroProgramBtn = $('#heroProgram');
+  if(heroProgramBtn) heroProgramBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
+  const viewCompletedProgramBtn = $('#viewCompletedProgram');
+  if(viewCompletedProgramBtn) viewCompletedProgramBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
+  const startEmptyHeroBtn = $('#startEmptyHero');
+  if(startEmptyHeroBtn) startEmptyHeroBtn.addEventListener('click', ()=>{ setTab('workout'); startSession(null); });
+  const currentProgramCard = $('#currentProgramCard');
+  if(currentProgramCard) currentProgramCard.addEventListener('click', ()=>{ setTab('workout'); wkNav('program-detail', {programId:activeProgram.id}); });
+  $$('[data-qnav]').forEach(b=> b.addEventListener('click', ()=>{
+    const t = QUICK_NAV_TILES[parseInt(b.dataset.qnav)];
+    setTab(t.tab);
+    if(t.wk) wkNav(t.wk);
+  }));
+  $$('.water-add').forEach(b=> b.addEventListener('click', ()=>{
+    const n = parseInt(b.dataset.n);
+    DB.waterLogs[date] = (DB.waterLogs[date]||0) + n;
+    save(); renderCurrent();
+    toast('Added '+n+' cup(s) of water');
+  }));
+  $$('.day-pill').forEach(p=> p.addEventListener('click', ()=>{
+    nut.date = p.dataset.day;
+    setTab('nutrition');
+  }));
+  $$('[data-recent]').forEach(el=> el.addEventListener('click', ()=>{
+    if(el.dataset.recent==='session' && el.dataset.recentSess){
+      setTab('workout');
+      wkNav('session-detail', {historyDate: el.dataset.recentSess});
+    } else if(el.dataset.recent==='activity'){
+      if(el.dataset.recentDate) nut.date = el.dataset.recentDate;
+      setTab('nutrition');
+      nutNav('activity');
+    }
+  }));
+};
+
+/* =========================================================
+   Simple line chart (SVG) for progression graphs
+   ========================================================= */
+function lineChartSVG(series, opts={}){
+  // series: [{label, color, points:[{x:Date-ish sortable, y:number}]}]
+  // opts.autoRange: fit the y-axis to the data (with headroom) instead of forcing a 0 baseline —
+  //   used for weight charts where values like 60-90 would be squashed against a 0 floor.
+  // opts.refLine: {y, label, color} — draws a dashed horizontal reference line (e.g. goal weight).
+  const w = opts.width||480, h = opts.height||160, pad=28;
+  let allPoints = series.flatMap(s=>s.points);
+  if(allPoints.length===0){
+    return `<div class="empty"><div class="e-title">${escapeHtml(opts.emptyTitle||'No data yet')}</div><div class="e-sub">${escapeHtml(opts.emptySub||'Log a few sessions to see progress here.')}</div></div>`;
+  }
+  const xs = allPoints.map(p=>p.x);
+  const ys = allPoints.map(p=>p.y);
+  if(opts.refLine) ys.push(opts.refLine.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  let minY, maxY;
+  if(opts.autoRange){
+    const dataMin = Math.min(...ys), dataMax = Math.max(...ys);
+    const span = Math.max(dataMax-dataMin, 1);
+    minY = dataMin - span*0.15;
+    maxY = dataMax + span*0.15;
+  } else {
+    minY = 0; maxY = Math.max(...ys)*1.15 || 1;
+  }
+  const xScale = x => maxX===minX ? pad : pad + (x-minX)/(maxX-minX) * (w-2*pad);
+  const yScale = y => h-pad - (y-minY)/(maxY-minY) * (h-2*pad);
+  let grid='';
+  for(let i=0;i<=3;i++){
+    const y = pad + i*(h-2*pad)/3;
+    grid += `<line x1="${pad}" y1="${y.toFixed(1)}" x2="${w-pad}" y2="${y.toFixed(1)}" stroke="var(--surface-3)" stroke-width="1"/>`;
+  }
+  let refLineSvg = '';
+  if(opts.refLine){
+    const ry = yScale(opts.refLine.y);
+    const color = opts.refLine.color || 'var(--green)';
+    refLineSvg = `<line x1="${pad}" y1="${ry.toFixed(1)}" x2="${w-pad}" y2="${ry.toFixed(1)}" stroke="${color}" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <text x="${w-pad}" y="${(ry-6).toFixed(1)}" text-anchor="end" font-size="10" fill="${color}" font-family="IBM Plex Mono, monospace">${escapeHtml(opts.refLine.label||'')}</text>`;
+  }
+  let paths='';
+  series.forEach(s=>{
+    if(s.points.length===0) return;
+    const sorted = [...s.points].sort((a,b)=>a.x-b.x);
+    const d = sorted.map((p,i)=> (i===0?'M':'L')+xScale(p.x).toFixed(1)+','+yScale(p.y).toFixed(1)).join(' ');
+    const dots = sorted.map(p=>`<circle cx="${xScale(p.x).toFixed(1)}" cy="${yScale(p.y).toFixed(1)}" r="3" fill="${s.color}"/>`).join('');
+    paths += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>${dots}`;
+  });
+  return `<div class="graph-wrap"><svg viewBox="0 0 ${w} ${h}">${grid}${refLineSvg}${paths}</svg></div>
+  <div class="graph-legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${escapeHtml(s.label)}</span>`).join('')}</div>`;
+}
+
+/* Tiny inline sparkline (no axes/grid) for compact dashboard cards. */
+function sparklineSVG(points, color, w=140, h=40){
+  if(!points || points.length<2) return `<div class="sub" style="font-size:11px;">Not enough data yet</div>`;
+  const sorted = [...points].sort((a,b)=>a.x-b.x);
+  const ys = sorted.map(p=>p.y);
+  const xs = sorted.map(p=>p.x);
+  const minX=Math.min(...xs), maxX=Math.max(...xs);
+  const dataMin=Math.min(...ys), dataMax=Math.max(...ys);
+  const span = Math.max(dataMax-dataMin, 0.5);
+  const minY = dataMin-span*0.2, maxY = dataMax+span*0.2;
+  const pad=3;
+  const xScale = x => maxX===minX ? pad : pad+(x-minX)/(maxX-minX)*(w-2*pad);
+  const yScale = y => h-pad-(y-minY)/(maxY-minY)*(h-2*pad);
+  const d = sorted.map((p,i)=> (i===0?'M':'L')+xScale(p.x).toFixed(1)+','+yScale(p.y).toFixed(1)).join(' ');
+  const last = sorted[sorted.length-1];
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${xScale(last.x).toFixed(1)}" cy="${yScale(last.y).toFixed(1)}" r="2.5" fill="${color}"/>
+  </svg>`;
+}
+
+/* =========================================================
+   WORKOUT MODULE
+   ========================================================= */
+let wk = { view:'home', routineId:null, exerciseId:null, editingRoutineDraft:null, historyDate:null, statExId:null, editingProgramDraft:null, programId:null, justFinishedSessionId:null };
+
+function exTypeLabel(t){
+  return {weight_reps:'Weight × Reps', bodyweight:'Bodyweight', assisted:'Assisted Bodyweight', duration:'Duration', cardio:'Cardio'}[t]||t;
+}
+
+renderers.workout = function(){
+  const root = $('#screen-workout');
+  if(DB.activeSession && wk.view!=='active-session'){ wk.view='active-session'; }
+  root.classList.toggle('workout-dark', wk.view==='active-session');
+  switch(wk.view){
+    case 'library': return renderExLibrary(root);
+    case 'exercise-detail': return renderExDetail(root);
+    case 'routines': return renderRoutinesList(root);
+    case 'routine-edit': return renderRoutineEdit(root);
+    case 'template-detail': return renderTemplateDetail(root);
+    case 'programs': return renderProgramsList(root);
+    case 'program-edit': return renderProgramEdit(root);
+    case 'program-detail': return renderProgramDetail(root);
+    case 'active-session': return renderActiveSession(root);
+    case 'history': return renderWkHistory(root);
+    case 'session-detail': return renderSessionDetail(root);
+    case 'stats': return renderWkStats(root);
+    case 'calculators': return renderCalculators(root);
+    default: return renderWorkoutHome(root);
+  }
+};
+
+function wkNav(view, extra={}){ wk = {...wk, view, ...extra}; renderCurrent(); resetScreenScroll('workout'); }
+
+function backHeader(title, onBack, right=''){
+  return `<div class="screen-head" style="display:flex;align-items:center;gap:10px;">
+    <button class="icon-btn" id="backBtn" aria-label="Back"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <h1 style="flex:1;font-size:20px;">${escapeHtml(title)}</h1>
+    ${right}
+  </div>`;
+}
+// Switching tabs only toggles .hidden on each tab's screen div — it never
+// clears their content — so a workout subview and a nutrition subview can
+// both be holding a #backHeader button with id="backBtn" at the same time
+// (one hidden, one visible). A plain $('#backBtn') is a document-wide
+// querySelector, so it can return the HIDDEN tab's button, silently
+// attaching the click handler to a button the user can't see or tap while
+// the visible one does nothing. Scope the lookup to the active tab's own
+// screen so it always finds the button that's actually on screen.
+function wireBack(fn){
+  const activeScreen = $('#screen-'+currentTab);
+  const b = activeScreen ? activeScreen.querySelector('#backBtn') : null;
+  if(b) b.addEventListener('click', fn);
+}
+
+function renderWorkoutHome(root){
+  // Note: if a workout is already active, renderers.workout() redirects to
+  // the active-session view before this function is ever reached — so
+  // "resume" doesn't need its own entry point here, this screen only shows
+  // when there's nothing in progress. Hierarchy from here down: a useful
+  // suggested/repeat template first, then Start Empty Workout, then the
+  // full template list, then secondary tools.
+  const suggested = suggestedRoutine();
+  let suggestedHtml = '';
+  if(suggested){
+    const st = templateStats(suggested.id);
+    suggestedHtml = `
+    <div class="card" style="border-color:var(--blue-line);">
+      <div class="card-title">${st.lastDate? 'Repeat' : 'Suggested'} <span class="tick">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Not done yet'}</span></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div style="min-width:0;">
+          <div style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:17px;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(suggested.name)}</div>
+          <div class="sub" style="margin-top:2px;">${suggested.groups.length} exercise${suggested.groups.length!==1?'s':''}</div>
+        </div>
+        <button class="btn btn-primary" id="startSuggestedHome" style="flex:none;">Start</button>
+      </div>
+    </div>`;
+  }
+  root.innerHTML = `
+    <div class="screen-head">
+      <h1>Train</h1>
+      <div class="sub">Start a workout and log it as you go.</div>
+    </div>
+
+    ${suggestedHtml}
+
+    <button class="btn ${suggested?'':'btn-primary'} btn-block" id="quickStart" style="margin-bottom:14px;">Start Empty Workout</button>
+
+    <div class="card" id="goRoutines" style="cursor:pointer;">
+      <div class="card-title">My Templates <span class="tick">${DB.routines.length}</span></div>
+      ${DB.routines.slice(0,3).map(r=>{
+        const st = templateStats(r.id);
+        return `<div class="list-row" data-tmpl="${r.id}"><div class="lr-main"><div class="lr-title">${escapeHtml(r.name)}</div><div class="lr-sub">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Never performed'} · ${st.timesCompleted}× done</div></div><span class="chip">${r.groups.length} ex.</span></div>`;
+      }).join('') || '<div class="empty"><div class="e-title">No templates yet</div><div class="e-sub">Build a template to reuse every week.</div><button class="btn btn-sm btn-primary" id="emptyNewTemplate" style="margin-top:10px;">+ Create Template</button></div>'}
+    </div>
+
+    <div class="row" style="margin-bottom:12px;">
+      <button class="btn" id="goHistory">History</button>
+      <button class="btn" id="goStats">Stats & PRs</button>
+    </div>
+    <div class="row" style="margin-bottom:12px;">
+      <button class="btn" id="goLibrary">Exercise Library</button>
+      <button class="btn" id="goCalc">Calculators</button>
+    </div>
+    <button class="btn btn-block" id="goPrograms" style="margin-bottom:12px;">Programs</button>
+  `;
+  const startSuggestedHomeBtn = $('#startSuggestedHome');
+  if(startSuggestedHomeBtn) startSuggestedHomeBtn.addEventListener('click', ()=> startSession(suggested.id));
+  $('#goRoutines').addEventListener('click', (e)=>{ if(!e.target.closest('[data-tmpl]') && !e.target.closest('#emptyNewTemplate')) wkNav('routines'); });
+  $$('[data-tmpl]').forEach(el=> el.addEventListener('click', (e)=>{ e.stopPropagation(); wkNav('template-detail', {routineId:el.dataset.tmpl}); }));
+  const emptyNewTemplate = $('#emptyNewTemplate');
+  if(emptyNewTemplate) emptyNewTemplate.addEventListener('click', (e)=>{ e.stopPropagation(); wk.editingRoutineDraft = {id:null, name:'', notes:'', groups:[]}; wkNav('routine-edit'); });
+  $('#goLibrary').addEventListener('click', ()=> wkNav('library'));
+  $('#goStats').addEventListener('click', ()=> wkNav('stats'));
+  $('#goHistory').addEventListener('click', ()=> wkNav('history'));
+  $('#goCalc').addEventListener('click', ()=> wkNav('calculators'));
+  $('#goPrograms').addEventListener('click', ()=> wkNav('programs'));
+  $('#quickStart').addEventListener('click', ()=>{
+    startSession(null);
+  });
+}
+
+/* ---------------- Exercise Library ---------------- */
+let libFilter = {q:'', cat:'All'};
+function renderExLibrary(root){
+  const cats = ['All', ...Array.from(new Set(DB.exercises.map(e=>e.category)))];
+  root.innerHTML = backHeader('Exercise Library', ()=> wkNav('home'), `<button class="btn btn-sm btn-primary" id="addCustomEx">+ Add</button>`);
+  root.innerHTML += `
+    <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input class="input" id="exSearch" placeholder="Search exercises" value="${escapeHtml(libFilter.q)}"></div>
+    <div class="filter-scroll">${cats.map(c=>`<button class="filter-chip ${libFilter.cat===c?'active':''}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}</div>
+    <div class="card" id="exResults"></div>
+  `;
+  wireBack(()=> wkNav('home'));
+  renderExResults();
+  // FIX #3: only the results list re-renders on each keystroke — the input itself is
+  // never replaced, so focus and cursor position are preserved on mobile.
+  $('#exSearch').addEventListener('input', e=>{ libFilter.q=e.target.value; renderExResults(); });
+  $('#addCustomEx').addEventListener('click', openAddExerciseModal);
+
+  function renderExResults(){
+    const filtered = DB.exercises.filter(e=>{
+      if(libFilter.cat!=='All' && e.category!==libFilter.cat) return false;
+      if(libFilter.q && !e.name.toLowerCase().includes(libFilter.q.toLowerCase())) return false;
+      return true;
+    });
+    $('#exResults').innerHTML = filtered.map(e=>`
+      <div class="list-row" data-id="${e.id}" style="cursor:pointer;">
+        <div class="lr-main"><div class="lr-title">${escapeHtml(e.name)}</div><div class="lr-sub">${escapeHtml(e.equipment)} · ${exTypeLabel(e.type)}</div></div>
+        <span class="chip">${escapeHtml(e.category)}</span>
+      </div>`).join('') || '<div class="empty"><div class="e-title">No matches</div><div class="e-sub">Try another search, or add it as a custom exercise.</div><button class="btn btn-sm btn-primary" id="emptyAddEx" style="margin-top:10px;">+ Add Custom Exercise</button></div>';
+    $$('.list-row[data-id]').forEach(r=> r.addEventListener('click', ()=> wkNav('exercise-detail', {exerciseId:r.dataset.id})));
+    $$('.filter-chip').forEach(b=> b.addEventListener('click', ()=>{ libFilter.cat=b.dataset.cat; $$('.filter-chip').forEach(x=>x.classList.toggle('active', x===b)); renderExResults(); }));
+    const emptyAdd = $('#emptyAddEx');
+    if(emptyAdd) emptyAdd.addEventListener('click', openAddExerciseModal);
+  }
+}
+
+function openAddExerciseModal(){
+  openModal(`
+    <div class="modal-head"><h3>New Exercise</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="field"><label>Name</label><input class="input" id="neName" placeholder="e.g. Cable Pull-Through"></div>
+    <div class="field"><label>Category</label>
+      <select class="input" id="neCat">${['Chest','Back','Legs','Shoulders','Arms','Core','Cardio','Full Body'].map(c=>`<option>${c}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>Equipment</label><input class="input" id="neEquip" placeholder="e.g. Cable"></div>
+    <div class="field"><label>Type</label>
+      <select class="input" id="neType">
+        <option value="weight_reps">Weight × Reps</option>
+        <option value="bodyweight">Bodyweight</option>
+        <option value="assisted">Assisted Bodyweight</option>
+        <option value="duration">Duration</option>
+        <option value="cardio">Cardio</option>
+      </select>
+    </div>
+    <div class="field"><label>Instructions</label><textarea class="input" id="neInstr" placeholder="How to perform it"></textarea></div>
+    <button class="btn btn-primary btn-block" id="neSave">Save Exercise</button>
+  `,{id:'newex'});
+  $('#mClose').addEventListener('click', ()=> closeModal('newex'));
+  $('#neSave').addEventListener('click', ()=>{
+    const name = $('#neName').value.trim();
+    if(!name){ toast('Give it a name'); return; }
+    const addExercise = ()=>{
+      DB.exercises.push(ex(name, $('#neCat').value, $('#neEquip').value.trim()||'—', $('#neType').value, $('#neInstr').value.trim()||'No instructions added yet.'));
+      DB.exercises[DB.exercises.length-1].custom = true;
+      save(); closeModal('newex'); toast('Exercise added'); renderCurrent();
+    };
+    const dup = DB.exercises.find(e=> e.name.toLowerCase()===name.toLowerCase());
+    if(dup){
+      openConfirmModal(`"${dup.name}" already exists in your library. Add another one with the same name?`, addExercise, {title:'Already Exists', confirmLabel:'Add Anyway'});
+      return;
+    }
+    addExercise();
+  });
+}
+
+function renderExDetail(root){
+  const e = exById(wk.exerciseId);
+  if(!e){ wkNav('library'); return; }
+  const prs = computePRs(e.id);
+  root.innerHTML = backHeader(e.name, ()=> wkNav('library'));
+  root.innerHTML += `
+    <div class="card">
+      <div class="row" style="margin-bottom:10px;">
+        <span class="chip">${escapeHtml(e.category)}</span>
+        <span class="chip">${escapeHtml(e.equipment)}</span>
+        <span class="chip">${exTypeLabel(e.type)}</span>
+      </div>
+      <div class="card-title">Instructions</div>
+      <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0;">${escapeHtml(e.instructions||'No instructions added yet.')}</p>
+    </div>
+    <div class="card">
+      <div class="card-title">Personal Records</div>
+      <div class="stat-grid">
+        ${prStatBoxesHtml(e.type, prs)}
+      </div>
+    </div>
+    ${prChartHtml(e.type, prs)}
+  `;
+  wireBack(()=> wkNav('library'));
+}
+
+/* Type-appropriate Personal Records stat boxes — see the exercise-type PR
+   audit: a weight-based "PR" is meaningless for bodyweight/assisted/duration/
+   cardio exercises, so each type gets only the metrics that make sense for
+   it rather than a wall of "—" placeholders. */
+function prStatBoxesHtml(type, prs){
+  if(type==='weight_reps'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxWeight? fmt1(toDisplayWeight(prs.maxWeight))+' '+unitLabel():'—'}</div><div class="sl">Max Weight</div></div>
+      <div class="stat-box"><div class="sv">${prs.best1RM? fmt1(toDisplayWeight(prs.best1RM))+' '+unitLabel():'—'}</div><div class="sl">Est. 1RM</div></div>
+      <div class="stat-box"><div class="sv">${prs.maxVolume? fmtInt(toDisplayWeight(prs.maxVolume)):'—'}</div><div class="sl">Best Session Volume</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='bodyweight'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxReps? prs.maxReps : '—'}</div><div class="sl">Best Reps</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='assisted'){
+    // Lower assistance = harder = the actual improvement, so this is never
+    // framed as a "max" the way a weight_reps PR is.
+    return `
+      <div class="stat-box"><div class="sv">${prs.minAssistWeight!=null? fmt1(toDisplayWeight(prs.minAssistWeight))+' '+unitLabel():'—'}</div><div class="sl">Least Assistance</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='duration'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxDuration? fmtDuration(prs.maxDuration) : '—'}</div><div class="sl">Best Hold</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  if(type==='cardio'){
+    return `
+      <div class="stat-box"><div class="sv">${prs.maxDistance? fmt1(prs.maxDistance) : '—'}</div><div class="sl">Best Distance</div></div>
+      <div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+  }
+  return `<div class="stat-box"><div class="sv">${prs.count}</div><div class="sl">Times Logged</div></div>`;
+}
+/* Type-appropriate progression chart — an empty/misleading "1RM Progression"
+   chart for a plank or a jog is worse than no chart at all. */
+function prChartHtml(type, prs){
+  if(type==='weight_reps'){
+    return `<div class="card"><div class="card-title">Est. 1RM Progression</div>${lineChartSVG([{label:'Est. 1RM ('+unitLabel()+')', color:'var(--blue)', points:prs.oneRMPoints.map(p=>({x:new Date(p.date).getTime(), y:toDisplayWeight(p.value)}))}])}</div>`;
+  }
+  if(type==='bodyweight'){
+    return `<div class="card"><div class="card-title">Best Reps Progression</div>${lineChartSVG([{label:'Reps', color:'var(--green)', points:prs.repPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
+  }
+  if(type==='duration'){
+    return `<div class="card"><div class="card-title">Best Hold Progression</div>${lineChartSVG([{label:'Seconds', color:'#F59A4B', points:prs.durationPoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>`;
+  }
+  if(type==='cardio'){
+    return prs.distancePoints.length ? `<div class="card"><div class="card-title">Best Distance Progression</div>${lineChartSVG([{label:'Distance', color:'var(--blue)', points:prs.distancePoints.map(p=>({x:new Date(p.date).getTime(), y:p.value}))}])}</div>` : '';
+  }
+  return ''; // assisted: a "lower is better" trend doesn't fit the standard chart — the stat box above is enough
+}
+
+/* PRs/stats are computed per the exercise TYPE the set was actually logged
+   under (exEntry.exType, frozen at logging time) rather than guessed from
+   which fields happen to be non-null — see the exercise-type PR audit:
+   - weight_reps: max weight, est. 1RM (Epley), session volume.
+   - bodyweight: best single-set reps (no external load, so no 1RM/weight PR).
+   - assisted: least assistance weight used (LOWER is the improvement here —
+     it means less help needed — so it is never treated as a weight "PR").
+   - duration: longest hold/time.
+   - cardio: longest single-set distance, where logged.
+   Warm-up sets never contribute (isWorkingSet excludes them), so they can
+   never inflate volume, 1RM or any of the type-specific bests. */
+function computePRs(exerciseId, sessions=DB.sessions){
+  let maxWeight=0, best1RM=0, maxVolume=0, count=0;
+  let maxReps=0, minAssistWeight=null, maxDuration=0, maxDistance=0;
+  const oneRMPoints=[], repPoints=[], durationPoints=[], distancePoints=[];
+  sessions.forEach(s=>{
+    (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
+      if(exEntry.exerciseId!==exerciseId) return;
+      let sessionVol=0, sessionBest1RM=0, sessionMaxReps=0, sessionMaxDuration=0, sessionMaxDistance=0;
+      let did=false;
+      (exEntry.sets||[]).forEach(set=>{
+        if(!isWorkingSet(set)) return;
+        did=true;
+        if(exEntry.exType==='weight_reps'){
+          if(Number.isFinite(set.weight) && Number.isFinite(set.reps)){
+            maxWeight = Math.max(maxWeight, set.weight);
+            const orm = estimate1RM(set.weight, set.reps);
+            best1RM = Math.max(best1RM, orm);
+            sessionBest1RM = Math.max(sessionBest1RM, orm);
+            sessionVol += set.weight*set.reps;
+          }
+        } else if(exEntry.exType==='bodyweight'){
+          if(Number.isFinite(set.reps)){ maxReps = Math.max(maxReps, set.reps); sessionMaxReps = Math.max(sessionMaxReps, set.reps); }
+        } else if(exEntry.exType==='assisted'){
+          if(Number.isFinite(set.assistWeight)) minAssistWeight = minAssistWeight==null ? set.assistWeight : Math.min(minAssistWeight, set.assistWeight);
+        } else if(exEntry.exType==='duration'){
+          if(Number.isFinite(set.durationSec)){ maxDuration = Math.max(maxDuration, set.durationSec); sessionMaxDuration = Math.max(sessionMaxDuration, set.durationSec); }
+        } else if(exEntry.exType==='cardio'){
+          if(Number.isFinite(set.distance)){ maxDistance = Math.max(maxDistance, set.distance); sessionMaxDistance = Math.max(sessionMaxDistance, set.distance); }
+        }
+      });
+      if(did){
+        count++;
+        maxVolume=Math.max(maxVolume, sessionVol);
+        if(sessionBest1RM>0) oneRMPoints.push({date:s.date, value:sessionBest1RM});
+        if(sessionMaxReps>0) repPoints.push({date:s.date, value:sessionMaxReps});
+        if(sessionMaxDuration>0) durationPoints.push({date:s.date, value:sessionMaxDuration});
+        if(sessionMaxDistance>0) distancePoints.push({date:s.date, value:sessionMaxDistance});
+      }
+    }));
+  });
+  return {maxWeight, best1RM, maxVolume, count, oneRMPoints, maxReps, repPoints, minAssistWeight, maxDuration, durationPoints, maxDistance, distancePoints};
+}
+
+/* V31: "which exercises in this specific (any, past or just-finished)
+   session set an all-time-as-of-then estimated-1RM best" -- reused by both
+   the workout-completion view and plain workout-history detail, so a PR
+   earned last month shows up exactly the same way as one earned just now.
+   Compares only against sessions strictly before this one chronologically
+   (never itself, never anything later), so re-opening an old workout can't
+   retroactively "gain" a PR a later session already broke. weight_reps
+   exercises only, same as the real-time PR toast -- 1RM estimation doesn't
+   apply to the other exercise types. */
+function sessionPRsAchieved(s){
+  const priorSessions = DB.sessions.filter(x=> x.id!==s.id && (x.date<s.date || (x.date===s.date && (x.startedAt||0)<(s.startedAt||0))));
+  const results = [];
+  (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
+    if(exEntry.exType!=='weight_reps') return;
+    const e = exById(exEntry.exerciseId);
+    if(!e) return;
+    let sessionBest1RM=0, bestSet=null;
+    (exEntry.sets||[]).forEach(set=>{
+      if(!isWorkingSet(set) || set.weight==null || set.reps==null) return;
+      const orm = estimate1RM(set.weight, set.reps);
+      if(orm>sessionBest1RM){ sessionBest1RM=orm; bestSet=set; }
+    });
+    if(sessionBest1RM<=0) return;
+    const priorBest1RM = computePRs(exEntry.exerciseId, priorSessions).best1RM;
+    if(sessionBest1RM>priorBest1RM){
+      results.push({exerciseId:exEntry.exerciseId, name:e.name, weight:bestSet.weight, reps:bestSet.reps, est1RM:sessionBest1RM, priorBest1RM});
+    }
+  }));
+  return results;
+}
+
+/* V32: "which sessions contain at least one PR" for every session at once,
+   for the History list's PR indicator. Same semantics as looping
+   sessionPRsAchieved(s) over every session (each session's PR status still
+   only depends on sessions strictly before it), but computed as a single
+   chronological pass with a running best-1RM-per-exercise map instead of
+   re-scanning all prior sessions from scratch for every row -- O(sessions)
+   instead of O(sessions²), which matters once history runs into the
+   hundreds. Returns a Set of session ids. */
+function allSessionPRIds(){
+  const sorted = [...DB.sessions].sort((a,b)=> a.date===b.date ? (a.startedAt||0)-(b.startedAt||0) : (a.date<b.date?-1:1));
+  const bestByExercise = {};
+  const prIds = new Set();
+  sorted.forEach(s=>{
+    (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
+      if(exEntry.exType!=='weight_reps') return;
+      let sessionBest1RM=0;
+      (exEntry.sets||[]).forEach(set=>{
+        if(!isWorkingSet(set) || set.weight==null || set.reps==null) return;
+        const orm = estimate1RM(set.weight, set.reps);
+        if(orm>sessionBest1RM) sessionBest1RM=orm;
+      });
+      if(sessionBest1RM<=0) return;
+      const priorBest = bestByExercise[exEntry.exerciseId] || 0;
+      if(sessionBest1RM>priorBest){
+        bestByExercise[exEntry.exerciseId] = sessionBest1RM;
+        prIds.add(s.id);
+      }
+    }));
+  });
+  return prIds;
+}
+
+/* Real-time PR toast, fired the instant a set is checked off — not just at
+   finish-workout time. Only ever compares against actual completed sessions
+   already in history (computePRs never sees the in-progress session), so
+   this can't manufacture a PR from an incomplete or hypothetical set, and
+   only counts when the estimate genuinely beats what's on record. */
+function announcePRIfAny(entry, set){
+  if(entry.exType!=='weight_reps') return; // 1RM only makes sense for loaded weight+reps lifts
+  if(!isWorkingSet(set) || set.weight==null || set.reps==null) return;
+  const e = exById(entry.exerciseId);
+  if(!e) return;
+  const priorBest1RM = computePRs(e.id).best1RM;
+  const thisEst = estimate1RM(set.weight, set.reps);
+  if(thisEst>0 && thisEst>priorBest1RM){
+    toast(`NEW PR — ${e.name}: ${fmt1(toDisplayWeight(set.weight))} ${unitLabel()} × ${set.reps} · est. 1RM ${fmt1(toDisplayWeight(thisEst))} ${unitLabel()}`, {pr:true});
+  }
+}
+
+/* ---------------- Routines list ---------------- */
+function renderRoutinesList(root){
+  root.innerHTML = backHeader('My Templates', ()=> wkNav('home'), `<button class="btn btn-sm btn-primary" id="newRoutine">+ New</button>`);
+  root.innerHTML += `<div class="card">${DB.routines.map(r=>{
+    const st = templateStats(r.id);
+    return `<div class="list-row">
+      <div class="lr-main" style="cursor:pointer;" data-open="${r.id}"><div class="lr-title">${escapeHtml(r.name)}</div><div class="lr-sub">${st.lastDate? 'Last: '+dateLabel(st.lastDate) : 'Never performed'} · ${st.timesCompleted}× done</div></div>
+      <div style="display:flex;gap:6px;flex:none;">
+        <button class="icon-btn" data-dup="${r.id}" title="Duplicate" aria-label="Duplicate routine" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+        <button class="icon-btn" data-edit="${r.id}" title="Edit" aria-label="Edit routine" style="width:32px;height:32px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg></button>
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty"><div class="e-title">No templates</div><div class="e-sub">Build one to reuse every week.</div><button class="btn btn-sm btn-primary" id="emptyNewRoutine" style="margin-top:10px;">+ Create Template</button></div>'}
+  </div>`;
+  wireBack(()=> wkNav('home'));
+  $('#newRoutine').addEventListener('click', ()=>{
+    wk.editingRoutineDraft = {id:null, name:'', notes:'', groups:[]};
+    wkNav('routine-edit');
+  });
+  const emptyNewRoutine = $('#emptyNewRoutine');
+  if(emptyNewRoutine) emptyNewRoutine.addEventListener('click', ()=>{
+    wk.editingRoutineDraft = {id:null, name:'', notes:'', groups:[]};
+    wkNav('routine-edit');
+  });
+  $$('[data-open]').forEach(el=> el.addEventListener('click', ()=> wkNav('template-detail', {routineId:el.dataset.open})));
+  $$('[data-edit]').forEach(el=> el.addEventListener('click', (ev)=>{
+    ev.stopPropagation();
+    const r = routineById(el.dataset.edit);
+    wk.editingRoutineDraft = JSON.parse(JSON.stringify(r));
+    wkNav('routine-edit');
+  }));
+  $$('[data-dup]').forEach(el=> el.addEventListener('click', (ev)=>{
+    ev.stopPropagation();
+    const r = routineById(el.dataset.dup);
+    // Deep-copy via JSON round-trip (same technique used when opening the
+    // editor) so the copy shares no object references with the original —
+    // editing/deleting one can never affect the other.
+    const copy = JSON.parse(JSON.stringify(r));
+    copy.id = uid();
+    copy.name = r.name + ' Copy';
+    DB.routines.push(copy);
+    save();
+    wk.editingRoutineDraft = JSON.parse(JSON.stringify(copy));
+    toast('Duplicated — rename and adjust as needed');
+    wkNav('routine-edit');
+  }));
+}
+
+/* ---------------- Template Detail ---------------- */
+function renderTemplateDetail(root){
+  const r = routineById(wk.routineId);
+  if(!r){ wkNav('routines'); return; }
+  const st = templateStats(r.id);
+  root.innerHTML = backHeader(r.name, ()=> wkNav('routines'));
+  root.innerHTML += `
+    ${r.notes? `<div class="sub" style="margin-bottom:10px;">${escapeHtml(r.notes)}</div>` : ''}
+    <div class="card">
+      <div class="card-title">Exercises <span class="tick">${r.groups.length} group${r.groups.length!==1?'s':''}</span></div>
+      ${r.groups.map((g,gi)=> g.map((item,ii)=>{
+        const e = exById(item.exerciseId);
+        const label = g.length>1 ? String.fromCharCode(65+gi)+(ii+1)+' · ' : '';
+        // V33: "what did I do last time" before the user even starts the
+        // workout, reusing the exact same derivations Active Workout uses
+        // (lastSessionLineForExercise / suggestNextLoad) rather than a
+        // second history lookup -- one source of truth for "last time" and
+        // for what counts as an "up" suggestion. Kept to one extra line per
+        // exercise (no per-set breakdown, no continue/repeat chip here --
+        // those already have a natural home once the workout is under way)
+        // so a 6-exercise routine doesn't turn into a wall of text.
+        const last = e ? lastSessionLineForExercise(e.id) : null;
+        const suggestion = e ? suggestNextLoad({exType:e.type, targetRepsMin:item.targetRepsMin, targetRepsMax:item.targetRepsMax}, previousSetsForExercise(e.id)) : null;
+        const lastLine = last
+          ? `<div class="lr-sub" style="margin-top:2px;">Last time: ${escapeHtml(last.line)}</div>`
+          : `<div class="lr-sub" style="margin-top:2px;color:var(--faint);">No previous session</div>`;
+        const upChip = suggestion && suggestion.type==='up'
+          ? ` <span class="chip pr" style="vertical-align:middle;">Try ${escapeHtml(fmt1(toDisplayWeight(suggestion.weight)))} ${escapeHtml(unitLabel())}</span>`
+          : '';
+        return `<div class="list-row"><div class="lr-main"><div class="lr-title">${label}${escapeHtml(e?e.name:'?')}${upChip}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div>${lastLine}</div></div>`;
+      }).join('')).join('')}
+    </div>
+    <button class="btn btn-primary btn-block" id="startTemplate" style="margin-bottom:14px;">Start This Template</button>
+    <div class="card">
+      <div class="card-title">Previous Sessions <span class="tick">${st.timesCompleted}</span></div>
+      ${st.sessions.map(s=>`<div class="list-row" data-sess="${s.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${dateLabel(s.date)}</div><div class="lr-sub">${s.durationMin||'-'} min · ${fmtInt(toDisplayWeight(sessionVolume(s)))} ${unitLabel()} vol</div></div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg></div>`).join('') || '<div class="empty"><div class="e-title">Never performed</div><div class="e-sub">Start it to begin building history.</div></div>'}
+    </div>
+    <button class="btn btn-ghost btn-block" id="editTemplate">Edit Template</button>
+  `;
+  wireBack(()=> wkNav('routines'));
+  $('#startTemplate').addEventListener('click', ()=> startSession(r.id));
+  $('#editTemplate').addEventListener('click', ()=>{
+    wk.editingRoutineDraft = JSON.parse(JSON.stringify(r));
+    wkNav('routine-edit');
+  });
+  $$('[data-sess]').forEach(el=> el.addEventListener('click', ()=> wkNav('session-detail', {historyDate:el.dataset.sess})));
+}
+
+/* ---------------- Routine editor ---------------- */
+function renderRoutineEdit(root){
+  const draft = wk.editingRoutineDraft;
+  root.innerHTML = backHeader(draft.id? 'Edit Routine':'New Routine', ()=> wkNav('routines'));
+  root.innerHTML += `
+    <div class="field"><label>Routine Name</label><input class="input" id="rName" value="${escapeHtml(draft.name)}" placeholder="e.g. Push Day"></div>
+    <div class="field"><label>Notes</label><input class="input" id="rNotes" value="${escapeHtml(draft.notes)}" placeholder="Optional"></div>
+    <div class="card-title" style="margin-top:6px;">Exercise Groups <span class="tick">Superset = multiple per group</span></div>
+    <div id="groupsList"></div>
+    <button class="btn btn-block" id="addGroup" style="margin-bottom:14px;">+ Add Exercise Group</button>
+    <div class="row">
+      <button class="btn btn-ghost" id="cancelRoutine">Cancel</button>
+      <button class="btn btn-primary" id="saveRoutine">Save Routine</button>
+    </div>
+    ${draft.id? `<button class="btn btn-danger btn-block" id="delRoutine" style="margin-top:10px;">Delete Routine</button>`:''}
+  `;
+  wireBack(()=> wkNav('routines'));
+  renderGroupsList();
+
+  function renderGroupsList(){
+    const list = $('#groupsList');
+    list.innerHTML = draft.groups.map((g,gi)=>`
+      <div class="card" style="padding:12px;">
+        <div class="card-title">${g.length>1?'Superset':'Exercise'} ${gi+1}
+          <div style="display:flex;gap:4px;align-items:center;">
+            <button class="icon-btn" data-movegroup="${gi}:up" title="Move up" aria-label="Move exercise group up" ${gi===0?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button class="icon-btn" data-movegroup="${gi}:down" title="Move down" aria-label="Move exercise group down" ${gi===draft.groups.length-1?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+            </button>
+            <button class="swipe-del" data-rmgroup="${gi}">Remove</button>
+          </div>
+        </div>
+        ${g.map((item,ii)=>{
+          const e = exById(item.exerciseId);
+          return `<div class="list-row" data-edititem="${gi}:${ii}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e?e.name:'Unknown')}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div></div>
+          <button class="swipe-del" data-rmitem="${gi}:${ii}">✕</button></div>`;
+        }).join('')}
+        <button class="btn btn-sm btn-ghost" data-addtogroup="${gi}" style="margin-top:6px;">+ Add exercise to this group (superset)</button>
+      </div>
+    `).join('');
+    $$('[data-rmgroup]').forEach(b=> b.addEventListener('click', ()=>{ draft.groups.splice(parseInt(b.dataset.rmgroup),1); renderGroupsList(); }));
+    $$('[data-movegroup]').forEach(b=> b.addEventListener('click', ()=>{
+      const [giRaw, dir] = b.dataset.movegroup.split(':');
+      const gi = parseInt(giRaw);
+      const target = dir==='up' ? gi-1 : gi+1;
+      if(target<0 || target>=draft.groups.length) return;
+      const [moved] = draft.groups.splice(gi,1);
+      draft.groups.splice(target,0,moved);
+      renderGroupsList();
+    }));
+    $$('[data-rmitem]').forEach(b=> b.addEventListener('click', (ev)=>{
+      ev.stopPropagation();
+      const [gi,ii] = b.dataset.rmitem.split(':').map(Number);
+      draft.groups[gi].splice(ii,1);
+      if(draft.groups[gi].length===0) draft.groups.splice(gi,1);
+      renderGroupsList();
+    }));
+    $$('[data-edititem]').forEach(el=> el.addEventListener('click', ()=>{
+      const [gi,ii] = el.dataset.edititem.split(':').map(Number);
+      const item = draft.groups[gi][ii];
+      const e = exById(item.exerciseId);
+      openRoutineItemEditor(item, e?e.name:'Exercise', ()=> renderGroupsList());
+    }));
+    $$('[data-addtogroup]').forEach(b=> b.addEventListener('click', ()=>{
+      openExercisePickerModal((exercise)=>{
+        draft.groups[parseInt(b.dataset.addtogroup)].push(defaultRoutineItem(exercise.id));
+        renderGroupsList();
+      });
+    }));
+  }
+
+  $('#addGroup').addEventListener('click', ()=>{
+    openExercisePickerModal((exercise)=>{
+      draft.groups.push([defaultRoutineItem(exercise.id)]);
+      renderGroupsList();
+    });
+  });
+  $('#cancelRoutine').addEventListener('click', ()=> wkNav('routines'));
+  $('#saveRoutine').addEventListener('click', ()=>{
+    draft.name = $('#rName').value.trim() || 'Untitled Routine';
+    draft.notes = $('#rNotes').value.trim();
+    if(draft.groups.length===0){ toast('Add at least one exercise'); return; }
+    if(draft.id){
+      const idx = DB.routines.findIndex(r=>r.id===draft.id);
+      DB.routines[idx] = draft;
+    } else {
+      draft.id = uid();
+      DB.routines.push(draft);
+    }
+    save(); toast('Routine saved'); wkNav('routines');
+  });
+  const delBtn = $('#delRoutine');
+  if(delBtn) delBtn.addEventListener('click', ()=>{
+    DB.routines = DB.routines.filter(r=>r.id!==draft.id);
+    save(); toast('Routine deleted'); wkNav('routines');
+  });
+}
+
+function openExercisePickerModal(onPick){
+  let q='';
+  renderList();
+  function renderList(){
+    const filtered = DB.exercises.filter(e=> e.name.toLowerCase().includes(q.toLowerCase()));
+    const html = `
+      <div class="modal-head"><h3>Choose Exercise</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="pickSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
+      <div id="pickList">${filtered.map(e=>`<div class="list-row" data-pick="${e.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e.name)}</div><div class="lr-sub">${escapeHtml(e.category)}</div></div></div>`).join('') || '<div class="empty"><div class="e-title">No matches</div></div>'}</div>
+    `;
+    const existing = $('#backdrop-pick');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html,{id:'pick'});
+    $('#mClose').addEventListener('click', ()=> closeModal('pick'));
+    $('#pickSearch').addEventListener('input', e=>{ q=e.target.value; renderList(); const i=$('#pickSearch'); i.focus(); i.selectionStart=i.selectionEnd=i.value.length; });
+    $$('[data-pick]').forEach(el=> el.addEventListener('click', ()=>{
+      const exercise = exById(el.dataset.pick);
+      closeModal('pick');
+      onPick(exercise);
+    }));
+  }
+}
+
+// Picks an existing routine to slot into a program week -- deliberately the
+// same search-modal pattern as openExercisePickerModal above, so building a
+// program feels like the same app rather than a bolted-on feature.
+function openRoutinePickerModal(onPick){
+  let q='';
+  renderList();
+  function renderList(){
+    const filtered = DB.routines.filter(r=> r.name.toLowerCase().includes(q.toLowerCase()));
+    const html = `
+      <div class="modal-head"><h3>Choose Routine</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="rpSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
+      <div>${filtered.map(r=>`<div class="list-row" data-pickr="${r.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(r.name)}</div><div class="lr-sub">${r.groups.reduce((n,g)=>n+g.length,0)} exercise${r.groups.reduce((n,g)=>n+g.length,0)!==1?'s':''}</div></div></div>`).join('') || '<div class="empty"><div class="e-title">No routines yet</div><div class="e-sub">Create a routine first, then add it to your program.</div></div>'}</div>
+    `;
+    const existing = $('#backdrop-rp');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html,{id:'rp'});
+    $('#mClose').addEventListener('click', ()=> closeModal('rp'));
+    const search = $('#rpSearch');
+    if(search) search.addEventListener('input', e=>{ q=e.target.value; renderList(); const i=$('#rpSearch'); i.focus(); i.selectionStart=i.selectionEnd=i.value.length; });
+    $$('[data-pickr]').forEach(el=> el.addEventListener('click', ()=>{
+      const routine = routineById(el.dataset.pickr);
+      closeModal('rp');
+      onPick(routine);
+    }));
+  }
+}
+
+/* ---------------- Programs list ---------------- */
+function renderProgramsList(root){
+  root.innerHTML = backHeader('Programs', ()=> wkNav('home'), `<button class="btn btn-sm btn-primary" id="newProgram">+ New</button>`);
+  const activeFirst = [...DB.programs].sort((a,b)=>{
+    const aActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===a.id;
+    const bActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===b.id;
+    return (bActive?1:0)-(aActive?1:0);
+  });
+  root.innerHTML += activeFirst.length ? activeFirst.map(p=>{
+    const pos = programPosition(p);
+    const isActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===p.id;
+    return `<div class="card" data-openprog="${p.id}" style="cursor:pointer;display:flex;align-items:center;gap:12px;">
+      <div class="icon-badge" style="background:rgba(59,209,130,0.14);color:var(--green);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9-6.3 3.9 1.7-7-5.4-4.7 7.1-.6z"/></svg></div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:15px;text-transform:uppercase;">${escapeHtml(p.name)}</span>${isActive?'<span class="badge-active">Active</span>':''}</div>
+        <div class="sub" style="margin-top:2px;">${p.weeks.length} week${p.weeks.length!==1?'s':''} · ${pos.totalWorkouts} workout${pos.totalWorkouts!==1?'s':''}${pos.totalWorkouts?` · ${pos.pct}% done`:''}</div>
+        ${pos.totalWorkouts ? `<div class="pbar green" style="margin-top:8px;"><div style="width:${pos.pct}%"></div></div>` : ''}
+      </div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" style="flex:none;"><path d="M9 18l6-6-6-6"/></svg>
+    </div>`;
+  }).join('') : `<div class="empty"><div class="icon-badge" style="width:52px;height:52px;border-radius:16px;background:var(--blue-dim);color:var(--blue-tint);margin:0 auto 14px;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h13l-3 4 3 4H5"/></svg></div><div class="e-title">No Program Yet</div><div class="e-sub">Create a structured training plan using your existing routines.</div><button class="btn btn-sm btn-primary" id="emptyNewProgram" style="margin-top:12px;">+ Create Program</button></div>`;
+  wireBack(()=> wkNav('home'));
+  $('#newProgram').addEventListener('click', ()=>{ wk.editingProgramDraft = newProgramDraft(); wkNav('program-edit'); });
+  const emptyNewProgram = $('#emptyNewProgram');
+  if(emptyNewProgram) emptyNewProgram.addEventListener('click', ()=>{ wk.editingProgramDraft = newProgramDraft(); wkNav('program-edit'); });
+  $$('[data-openprog]').forEach(el=> el.addEventListener('click', ()=> wkNav('program-detail', {programId: el.dataset.openprog})));
+}
+
+/* ---------------- Program detail ---------------- */
+function programOverviewRow(label, value){
+  return `<div><span class="ms-detail-lbl">${escapeHtml(label)}</span><span class="ms-detail-val" style="text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">${escapeHtml(value)}</span></div>`;
+}
+function renderProgramDetail(root){
+  const p = programById(wk.programId);
+  if(!p){ wkNav('programs'); return; }
+  const pos = programPosition(p);
+  const isActive = DB.settings.activeProgram && DB.settings.activeProgram.programId===p.id;
+  root.innerHTML = backHeader(p.name, ()=> wkNav('programs'));
+  root.innerHTML += `
+    ${p.description? `<div class="sub" style="margin-bottom:10px;">${escapeHtml(p.description)}</div>` : ''}
+    <div class="card">
+      <div class="card-title">Progress <span class="tick">${pos.completedCount}/${pos.totalWorkouts} workouts</span></div>
+      <div class="pbar green" style="margin-bottom:4px;"><div style="width:${pos.pct}%"></div></div>
+      <div class="sub">${pos.complete? 'Program complete!' : (pos.totalWorkouts? `Week ${pos.currentWeekNumber} of ${p.weeks.length}${pos.currentPhase?' · '+escapeHtml(pos.currentPhase):''}` : 'No workouts added to this program yet.')}</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Program Overview</div>
+      <div class="ms-detail-grid" style="padding:0;">
+        ${programOverviewRow('Phase', pos.currentPhase || '—')}
+        ${programOverviewRow('Weeks', String(p.weeks.length))}
+        ${programOverviewRow('Current Week', pos.complete ? 'Complete' : String(pos.currentWeekNumber||1))}
+        ${programOverviewRow('Next Workout', pos.complete ? '—' : (pos.nextRoutine ? pos.nextRoutine.name : '—'))}
+      </div>
+    </div>
+    ${!pos.complete && pos.nextRoutine ? `<button class="btn btn-primary btn-block" id="startProgramWorkout" style="margin-bottom:14px;">Start: ${escapeHtml(pos.nextRoutine.name)}</button>` : ''}
+    <div class="card">
+      <div class="card-title">Weekly Schedule</div>
+      ${(()=>{
+        // V29: give each week the same done/current/upcoming distinction
+        // Active Workout already uses for sets -- derived from the same
+        // flat completed-count math programPosition() already computes,
+        // never a second source of truth.
+        let flatIdx = 0;
+        return p.weeks.map((w,wi)=>{
+          const slotCount = (w.routineIds||[]).length;
+          const weekStart = flatIdx, weekEnd = flatIdx + slotCount;
+          flatIdx = weekEnd;
+          const weekDone = slotCount>0 && weekEnd<=pos.completedCount;
+          const weekCurrent = !weekDone && weekStart<pos.totalWorkouts && weekStart<=pos.completedCount && !pos.complete && wi===(pos.next?pos.next.weekIndex:-1);
+          const routineNames = (w.routineIds||[]).map(rid=>{ const r=routineById(rid); return r?escapeHtml(r.name):'(deleted routine)'; }).join(', ') || 'No workouts';
+          const statusIcon = weekDone
+            ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>`
+            : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${weekCurrent?'var(--blue)':'var(--faint)'}" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>`;
+          return `<div class="list-row" style="cursor:default;${weekCurrent?'background:rgba(90,135,245,0.06);margin:0 -14px;padding:11px 14px;width:calc(100% + 28px);':''}">
+            ${statusIcon}
+            <div class="lr-main"><div class="lr-title">Week ${wi+1}${w.phase?' · '+escapeHtml(w.phase):''}${weekCurrent?' <span class="chip current-chip">Now</span>':''}</div><div class="lr-sub">${routineNames}</div></div>
+          </div>`;
+        }).join('');
+      })() || `<div class="sub" style="padding:4px 0;">No weeks yet.</div>`}
+    </div>
+    <div class="row" style="margin-bottom:12px;">
+      <button class="btn" id="editProgram">Edit Program</button>
+      <button class="btn ${isActive?'btn-ghost':'btn-primary'}" id="toggleActiveProgram">${isActive?'Stop Following':'Follow This Program'}</button>
+    </div>
+  `;
+  wireBack(()=> wkNav('programs'));
+  const startBtn = $('#startProgramWorkout');
+  if(startBtn) startBtn.addEventListener('click', ()=>{
+    startSession(pos.next.routineId, {programId:p.id, programName:p.name, weekNumber:pos.currentWeekNumber, phase:pos.currentPhase});
+  });
+  $('#editProgram').addEventListener('click', ()=>{ wk.editingProgramDraft = JSON.parse(JSON.stringify(p)); wkNav('program-edit'); });
+  $('#toggleActiveProgram').addEventListener('click', ()=>{
+    DB.settings.activeProgram = isActive ? null : {programId:p.id};
+    save(); toast(isActive? 'Stopped following '+p.name : 'Now following '+p.name); wkNav('program-detail', {programId:p.id});
+  });
+}
+
+/* ---------------- Program editor ---------------- */
+function renderProgramEdit(root){
+  const draft = wk.editingProgramDraft;
+  root.innerHTML = backHeader(draft.id? 'Edit Program':'New Program', ()=> wkNav(draft.id?'program-detail':'programs', {programId:draft.id}));
+  root.innerHTML += `
+    <div class="field"><label>Program Name</label><input class="input" id="pgName" value="${escapeHtml(draft.name)}" placeholder="e.g. 12 Week Strength"></div>
+    <div class="field"><label>Description <span style="color:var(--faint);">optional</span></label><input class="input" id="pgDesc" value="${escapeHtml(draft.description||'')}" placeholder="What's this program for?"></div>
+    <div class="card-title" style="margin-top:6px;">Weeks <span class="tick">Phase is optional</span></div>
+    <div id="weeksList"></div>
+    <button class="btn btn-block" id="addWeek" style="margin-bottom:14px;">+ Add Week</button>
+    <div class="row">
+      <button class="btn btn-ghost" id="cancelProgram">Cancel</button>
+      <button class="btn btn-primary" id="saveProgram">Save Program</button>
+    </div>
+    ${draft.id? `<button class="btn btn-danger btn-block" id="delProgram" style="margin-top:10px;">Delete Program</button>`:''}
+  `;
+  wireBack(()=> wkNav(draft.id?'program-detail':'programs', {programId:draft.id}));
+  renderWeeksList();
+
+  function renderWeeksList(){
+    const list = $('#weeksList');
+    list.innerHTML = draft.weeks.map((w,wi)=>`
+      <div class="card" style="padding:12px;">
+        <div class="card-title">Week ${wi+1}
+          <div style="display:flex;gap:4px;align-items:center;">
+            <button class="icon-btn" data-moveweek="${wi}:up" title="Move up" aria-label="Move week up" ${wi===0?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button class="icon-btn" data-moveweek="${wi}:down" title="Move down" aria-label="Move week down" ${wi===draft.weeks.length-1?'disabled':''} style="width:26px;height:26px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+            </button>
+            <button class="swipe-del" data-rmweek="${wi}">Remove</button>
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:8px;"><label>Phase <span style="color:var(--faint);">optional</span></label><input class="input" data-phase="${wi}" value="${escapeHtml(w.phase||'')}" placeholder="e.g. Foundation, Build, Deload"></div>
+        ${(w.routineIds||[]).map((rid,ri)=>{
+          const r = routineById(rid);
+          return `<div class="list-row"><div class="lr-main"><div class="lr-title">${r?escapeHtml(r.name):'(deleted routine)'}</div></div><button class="swipe-del" data-rmworkout="${wi}:${ri}">✕</button></div>`;
+        }).join('')}
+        <button class="btn btn-sm btn-ghost" data-addworkout="${wi}" style="margin-top:6px;">+ Add Workout</button>
+      </div>
+    `).join('') || `<div class="sub" style="padding:4px 0 10px;">No weeks yet — add one to start scheduling workouts.</div>`;
+    $$('[data-rmweek]').forEach(b=> b.addEventListener('click', ()=>{ draft.weeks.splice(parseInt(b.dataset.rmweek),1); renderWeeksList(); }));
+    $$('[data-moveweek]').forEach(b=> b.addEventListener('click', ()=>{
+      const [wiRaw, dir] = b.dataset.moveweek.split(':');
+      const wi = parseInt(wiRaw);
+      const target = dir==='up' ? wi-1 : wi+1;
+      if(target<0 || target>=draft.weeks.length) return;
+      const [moved] = draft.weeks.splice(wi,1);
+      draft.weeks.splice(target,0,moved);
+      renderWeeksList();
+    }));
+    $$('[data-phase]').forEach(inp=> inp.addEventListener('input', ()=>{ draft.weeks[parseInt(inp.dataset.phase)].phase = inp.value; }));
+    $$('[data-rmworkout]').forEach(b=> b.addEventListener('click', ()=>{
+      const [wi,ri] = b.dataset.rmworkout.split(':').map(Number);
+      draft.weeks[wi].routineIds.splice(ri,1);
+      renderWeeksList();
+    }));
+    $$('[data-addworkout]').forEach(b=> b.addEventListener('click', ()=>{
+      const wi = parseInt(b.dataset.addworkout);
+      openRoutinePickerModal((routine)=>{
+        if(!routine) return;
+        if(!draft.weeks[wi].routineIds) draft.weeks[wi].routineIds = [];
+        draft.weeks[wi].routineIds.push(routine.id);
+        renderWeeksList();
+      });
+    }));
+  }
+
+  $('#addWeek').addEventListener('click', ()=>{
+    draft.weeks.push({ phase:null, routineIds:[] });
+    renderWeeksList();
+  });
+  $('#cancelProgram').addEventListener('click', ()=> wkNav(draft.id?'program-detail':'programs', {programId:draft.id}));
+  $('#saveProgram').addEventListener('click', ()=>{
+    draft.name = $('#pgName').value.trim() || 'Untitled Program';
+    draft.description = $('#pgDesc').value.trim();
+    draft.weeks.forEach(w=>{ w.phase = (w.phase||'').trim() || null; });
+    if(draft.id){
+      const idx = DB.programs.findIndex(x=>x.id===draft.id);
+      DB.programs[idx] = draft;
+    } else {
+      draft.id = uid();
+      DB.programs.push(draft);
+    }
+    save(); toast('Program saved'); wkNav('program-detail', {programId:draft.id});
+  });
+  const delBtn = $('#delProgram');
+  if(delBtn) delBtn.addEventListener('click', ()=>{
+    DB.programs = DB.programs.filter(x=>x.id!==draft.id);
+    // Following the program you just deleted would point at nothing -- clear
+    // it the same way completing a program leaves settings.activeProgram
+    // alone (harmless dangling id) EXCEPT here the program itself is gone,
+    // so leaving it set would silently break the Dashboard's program card.
+    if(DB.settings.activeProgram && DB.settings.activeProgram.programId===draft.id) DB.settings.activeProgram = null;
+    save(); toast('Program deleted'); wkNav('programs');
+  });
+}
+
+/* Prescription editor for a single routine exercise: sets, rep range, optional
+   target weight, rest, optional RPE target and notes. Kept as one flat form
+   (not a per-type wizard) so editing a routine stays fast. */
+function openRoutineItemEditor(item, exerciseName, onSave){
+  openModal(`
+    <div class="modal-head"><h3>${escapeHtml(exerciseName)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="row">
+      <div class="field"><label>Sets</label><input class="input" id="riSets" type="number" min="1" step="1" value="${item.targetSets}"></div>
+      <div class="field"><label>Rest (sec)</label><input class="input" id="riRest" type="number" min="0" step="5" value="${item.restSec}"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Rep range — min</label><input class="input" id="riRepMin" type="number" min="1" step="1" value="${item.targetRepsMin}"></div>
+      <div class="field"><label>Rep range — max</label><input class="input" id="riRepMax" type="number" min="1" step="1" value="${item.targetRepsMax}"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Target weight (${unitLabel()}) <span style="color:var(--faint);">optional</span></label><input class="input" id="riWeight" type="number" step="0.5" min="0" value="${item.targetWeight!=null?fmt1(toDisplayWeight(item.targetWeight)):''}"></div>
+      <div class="field"><label>RPE target <span style="color:var(--faint);">optional</span></label><input class="input" id="riRpe" type="number" min="1" max="10" step="0.5" value="${item.rpeTarget??''}"></div>
+    </div>
+    <div class="field"><label>Notes</label><input class="input" id="riNotes" value="${escapeHtml(item.notes||'')}" placeholder="Optional cue, e.g. pause reps"></div>
+    <button class="btn btn-primary btn-block" id="riSave">Save</button>
+  `, {id:'routineitem'});
+  $('#mClose').addEventListener('click', ()=> closeModal('routineitem'));
+  $('#riSave').addEventListener('click', ()=>{
+    const sets = parseInt($('#riSets').value);
+    const restRaw = $('#riRest').value;
+    const repMin = parseInt($('#riRepMin').value);
+    const repMaxRaw = parseInt($('#riRepMax').value);
+    const wRaw = $('#riWeight').value;
+    const rpeRaw = $('#riRpe').value;
+    item.targetSets = (!isNaN(sets) && sets>0) ? sets : item.targetSets;
+    item.restSec = restRaw===''? item.restSec : Math.max(0, parseInt(restRaw)||0);
+    item.targetRepsMin = (!isNaN(repMin) && repMin>0) ? repMin : item.targetRepsMin;
+    item.targetRepsMax = (!isNaN(repMaxRaw) && repMaxRaw>=item.targetRepsMin) ? repMaxRaw : item.targetRepsMin;
+    if(wRaw===''){ item.targetWeight = null; }
+    else { const wVal = parseFloat(wRaw); if(Number.isFinite(wVal) && wVal>=0) item.targetWeight = fromDisplayWeight(wVal); else toast('Target weight ignored — enter a valid number 0 or greater'); }
+    if(rpeRaw===''){ item.rpeTarget = null; }
+    else { const rVal = parseFloat(rpeRaw); if(Number.isFinite(rVal) && rVal>=1 && rVal<=10) item.rpeTarget = rVal; else toast('RPE target ignored — enter a number between 1 and 10'); }
+    item.notes = $('#riNotes').value.trim();
+    closeModal('routineitem');
+    onSave();
+  });
+}
+
+/* Exercise substitution — real alternatives only, drawn from the same
+   category (muscle group) in the actual exercise library, ranked by closest
+   equipment match. Never fabricates a "science-backed" equivalence; if the
+   library has nothing else in that category it says so plainly. */
+function openReplaceExerciseModal(entry, onReplace){
+  const cur = exById(entry.exerciseId);
+  if(!cur){ toast('Cannot find the current exercise'); return; }
+  const alternatives = DB.exercises
+    .filter(e=> e.id!==cur.id && e.category===cur.category)
+    .sort((a,b)=>{
+      const aEq = a.equipment===cur.equipment ? 0 : 1, bEq = b.equipment===cur.equipment ? 0 : 1;
+      return (aEq-bEq) || a.name.localeCompare(b.name);
+    });
+  if(alternatives.length===0){
+    openModal(`
+      <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="empty"><div class="e-title">No suitable alternative found</div><div class="e-sub">No other ${escapeHtml(cur.category)} exercises are in your library yet.</div></div>
+    `, {id:'replaceex'});
+    $('#mClose').addEventListener('click', ()=> closeModal('replaceex'));
+    return;
+  }
+  openModal(`
+    <div class="modal-head"><h3>Replace ${escapeHtml(cur.name)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="sub" style="margin-bottom:10px;">Same muscle group (${escapeHtml(cur.category)}) · closest equipment match first</div>
+    <div>${alternatives.map(e=>`<div class="list-row" data-alt="${e.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(e.name)}</div><div class="lr-sub">${escapeHtml(e.equipment)} · ${exTypeLabel(e.type)}</div></div></div>`).join('')}</div>
+  `, {id:'replaceex'});
+  $('#mClose').addEventListener('click', ()=> closeModal('replaceex'));
+  $$('[data-alt]').forEach(el=> el.addEventListener('click', ()=>{
+    const alt = exById(el.dataset.alt);
+    closeModal('replaceex');
+    onReplace(alt);
+  }));
+}
+
+/* ---------------- Active Session ---------------- */
+function blankSetForType(type){
+  if(type==='weight_reps') return {weight:null, reps:null, done:false, tag:'Working', rpe:null};
+  if(type==='bodyweight') return {reps:null, done:false, tag:'Working', rpe:null};
+  if(type==='assisted') return {assistWeight:null, reps:null, done:false, tag:'Working', rpe:null};
+  if(type==='duration') return {durationSec:null, done:false, tag:'Working', rpe:null};
+  if(type==='cardio') return {distance:null, durationSec:null, calories:null, done:false, tag:'Working', rpe:null};
+  return {done:false, tag:'Working', rpe:null};
+}
+
+function findLastSetForExercise(exerciseId, preferRoutineId){
+  const sorted = [...DB.sessions].sort((a,b)=> b.startedAt-a.startedAt);
+  function search(filterFn){
+    for(const s of sorted){
+      if(filterFn && !filterFn(s)) continue;
+      for(const g of s.groups){
+        for(const e of g){
+          if(e.exerciseId!==exerciseId) continue;
+          const workingSets = e.sets.filter(isWorkingSet);
+          const doneSets = e.sets.filter(st=>st.done);
+          const last = workingSets[workingSets.length-1] || doneSets[doneSets.length-1] || e.sets[e.sets.length-1];
+          if(last) return last;
+        }
+      }
+    }
+    return null;
+  }
+  if(preferRoutineId){
+    const found = search(s=> s.routineId===preferRoutineId);
+    if(found) return found;
+  }
+  return search(null);
+}
+
+/* One-line summary of the most recent time this exercise was performed (all its
+   done sets from that session), e.g. "205 × 5, 195 × 6" — shown as a quick
+   reference while logging today's sets so you know what to beat. */
+function lastSessionLineForExercise(exerciseId, excludeSessionId){
+  const sorted = [...DB.sessions].filter(s=>s.id!==excludeSessionId).sort((a,b)=> b.startedAt-a.startedAt);
+  for(const sess of sorted){
+    for(const g of sess.groups){
+      for(const e of g){
+        if(e.exerciseId!==exerciseId) continue;
+        const doneSets = e.sets.filter(st=>st.done);
+        if(doneSets.length===0) continue;
+        const parts = doneSets.map(st=> setDisplayShort(e.exType, st)).filter(Boolean);
+        if(parts.length) return {date:sess.date, line:parts.join(', ')};
+      }
+    }
+  }
+  return null;
+}
+/* Full previous-session set list (in order, including tags) for the "Previous"
+   reference column in the active workout — unlike lastSessionLineForExercise
+   (a one-line summary) this preserves per-set detail so set 1 can be compared
+   against set 1, set 2 against set 2, etc. Returns [] if never performed. */
+function previousSetsForExercise(exerciseId, excludeSessionId){
+  const sorted = [...DB.sessions].filter(s=>s.id!==excludeSessionId).sort((a,b)=> b.startedAt-a.startedAt);
+  for(const sess of sorted){
+    for(const g of sess.groups){
+      for(const e of g){
+        if(e.exerciseId!==exerciseId) continue;
+        const doneSets = e.sets.filter(st=>st.done);
+        if(doneSets.length===0) continue;
+        return doneSets.map(st=>({...st, exType:e.exType}));
+      }
+    }
+  }
+  return [];
+}
+/* V28: non-destructive auto-progression suggestion, expanded from V27's
+   "beat the top of your range" case to all three real outcomes a set can
+   have against a target rep range. Only ever surfaces something when
+   there's real prior working-set data AND a defined target rep range --
+   otherwise returns null, never a guess. NEVER writes to the set/entry --
+   purely an informational read, same as before. The three cases:
+     'up'       - hit/beat the top of the range -> suggest more weight
+     'continue' - within range but below the top -> same weight, aim higher
+     'repeat'   - missed the bottom of the range -> same weight, try again
+   Each case explains WHY, per the V28 spec's "user should understand why a
+   recommendation appears" requirement -- this is why the message is built
+   here (where the actual prior numbers are in scope) rather than left for
+   the caller to reconstruct from a bare {weight} object. */
+// Distinct icon + text label per suggestion type so the difference between
+// "increase", "continue toward the top of the range" and "repeat, you
+// missed the target" is never communicated by color alone (accessibility
+// requirement -- the ex-suggest-{type} CSS classes below add color as a
+// secondary reinforcement, not the only signal).
+const SUGGEST_LABELS = { up:'Try', continue:'Continue', repeat:'Repeat' };
+const SUGGEST_ICON_PATHS = {
+  up: '<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>',
+  continue: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/>',
+  repeat: '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>'
+};
+
+function suggestNextLoad(entry, prevSets){
+  if(entry.exType!=='weight_reps') return null;
+  const targetMin = entry.targetRepsMin ?? entry.targetRepsMax;
+  const targetMax = entry.targetRepsMax ?? entry.targetRepsMin;
+  if(targetMax==null) return null;
+  const workingPrev = (prevSets||[]).filter(st=> st.tag==='Working' && st.weight!=null && st.reps!=null);
+  if(!workingPrev.length) return null;
+  const topWeight = Math.max(...workingPrev.map(st=>st.weight));
+  const topSets = workingPrev.filter(st=>st.weight===topWeight);
+  const bestReps = Math.max(...topSets.map(st=>st.reps));
+  const u = unitLabel();
+  const wDisp = w => fmt1(toDisplayWeight(w));
+
+  if(bestReps>=targetMax){
+    const incrementDisplay = DB.settings.units==='kg' ? 2.5 : 5;
+    const nextWeight = topWeight + fromDisplayWeight(incrementDisplay);
+    return { type:'up', weight:nextWeight,
+      message:`Try ${wDisp(nextWeight)} ${u} — you hit the top of your range (${bestReps} reps) last time.` };
+  }
+  if(bestReps>=targetMin){
+    return { type:'continue', weight:topWeight,
+      message:`You're at ${bestReps} reps — repeat ${wDisp(topWeight)} ${u} and aim for ${targetMax} before increasing weight.` };
+  }
+  return { type:'repeat', weight:topWeight,
+    message:`You got ${bestReps} reps last time, below your ${targetMin}-rep target. Repeat ${wDisp(topWeight)} ${u} and aim for ${targetMin}+.` };
+}
+
+function setDisplayShort(type, set){
+  const u = unitLabel();
+  if(type==='weight_reps') return (set.weight!=null && set.reps!=null) ? `${fmt1(toDisplayWeight(set.weight))} × ${set.reps}` : null;
+  if(type==='bodyweight') return set.reps!=null ? `BW × ${set.reps}` : null;
+  if(type==='assisted') return (set.assistWeight!=null && set.reps!=null) ? `-${fmt1(toDisplayWeight(set.assistWeight))} × ${set.reps}` : null;
+  if(type==='duration') return set.durationSec!=null ? `${Math.floor(set.durationSec/60)}:${(set.durationSec%60).toString().padStart(2,'0')}` : null;
+  if(type==='cardio') return set.distance!=null ? `${set.distance} ${set.durationSec?('· '+set.durationSec+'s'):''}` : null;
+  return null;
+}
+function prefillSetForType(type, last){
+  const base = blankSetForType(type);
+  if(!last) return base;
+  if(type==='weight_reps'){ base.weight=last.weight??null; base.reps=last.reps??null; }
+  else if(type==='bodyweight'){ base.reps=last.reps??null; }
+  else if(type==='assisted'){ base.assistWeight=last.assistWeight??null; base.reps=last.reps??null; }
+  else if(type==='duration'){ base.durationSec=last.durationSec??null; }
+  else if(type==='cardio'){ base.distance=last.distance??null; base.durationSec=last.durationSec??null; base.calories=last.calories??null; }
+  return base;
+}
+
+function templateStats(routineId){
+  const sessions = DB.sessions.filter(s=>s.routineId===routineId).sort((a,b)=> b.startedAt-a.startedAt);
+  return { lastDate: sessions[0]? sessions[0].date : null, timesCompleted: sessions.length, sessions };
+}
+
+/* A routine exercise is a real prescription, not just an exercise reference —
+   see BUG A: routines used to only ever spin up a single set at session
+   start, silently dropping the planned set count. */
+function defaultRoutineItem(exerciseId){
+  return {
+    exerciseId,
+    restSec: DB.settings.restDefault,
+    targetSets: 3,
+    targetRepsMin: 8,
+    targetRepsMax: 12,
+    targetWeight: null, // lbs internally, optional
+    rpeTarget: null,
+    notes: ''
+  };
+}
+/* Backfills a routine exercise saved before target prescriptions existed.
+   Never overwrites a value that's already present — only fills gaps, so
+   routines the user already fine-tuned are left exactly as they are. */
+// V26 fix (pre-existing bug found during the V25 audit): this used to read
+// the global `DB` for the default rest time, but both callers run before
+// `DB` exists yet — seedData() while building the very DB that `let DB =
+// load()` is about to become, and migrate() on a legacy v1 save, called
+// from inside that same `load()` call. Either path hit a "Cannot access
+// 'DB' before initialization" crash whenever a routine item actually
+// needed the fallback (seed routines always set restSec explicitly, which
+// is why this only ever surfaced for old v1 saves with populated routines
+// missing restSec). Taking the fallback as a parameter removes the
+// dependency on load order entirely.
+function migrateRoutineItem(item, fallbackRestSec){
+  if(item.targetSets==null || item.targetSets<1) item.targetSets = 3;
+  if(item.targetRepsMin==null) item.targetRepsMin = 8;
+  if(item.targetRepsMax==null) item.targetRepsMax = item.targetRepsMin;
+  if(item.targetWeight===undefined) item.targetWeight = null;
+  if(item.rpeTarget===undefined) item.rpeTarget = null;
+  if(item.notes===undefined) item.notes = '';
+  if(item.restSec==null) item.restSec = fallbackRestSec;
+  return item;
+}
+/* Prescription line shown under an exercise during an active session — frozen
+   from the routine at the moment the session started, so later edits to the
+   routine never retroactively change a workout already in progress. */
+function entryTargetLine(entry){
+  const parts = [];
+  if(entry.targetRepsMin!=null || entry.targetRepsMax!=null){
+    const rmin = entry.targetRepsMin, rmax = entry.targetRepsMax;
+    parts.push(rmin==null||rmax==null||rmin===rmax ? `Target ${rmax??rmin} reps` : `Target ${rmin}–${rmax} reps`);
+  }
+  if(entry.targetWeight!=null) parts.push(`${fmt1(toDisplayWeight(entry.targetWeight))} ${unitLabel()}`);
+  if(entry.rpeTarget!=null) parts.push(`RPE ${entry.rpeTarget}`);
+  return parts.join(' · ');
+}
+function routineItemSummary(item){
+  const u = unitLabel();
+  const repRange = item.targetRepsMin===item.targetRepsMax ? item.targetRepsMax : `${item.targetRepsMin}–${item.targetRepsMax}`;
+  const parts = [`${item.targetSets} × ${repRange}`];
+  if(item.targetWeight!=null) parts.push(`${fmt1(toDisplayWeight(item.targetWeight))} ${u}`);
+  parts.push(`Rest ${item.restSec}s`);
+  if(item.rpeTarget!=null) parts.push(`RPE ${item.rpeTarget}`);
+  return parts.join(' · ');
+}
+
+// programContext (optional): {programId, programName, weekNumber, phase} --
+// stamped onto the session at start time and frozen there, the same way
+// routineName is already frozen so later routine edits never retroactively
+// change a workout already logged. This is the ONLY place program linkage
+// is written; completeSession() already copies the whole activeSession
+// object into DB.sessions verbatim, so no separate history/tracking system
+// is needed for "was this workout part of a program".
+function startSession(routineId, programContext){
+  const routine = routineId ? routineById(routineId) : null;
+  const groups = (routine? routine.groups : []).map(g=> g.map(item=>{
+    const e = exById(item.exerciseId);
+    const type = e?e.type:'weight_reps';
+    const prevSets = previousSetsForExercise(item.exerciseId, null);
+    const targetSets = Math.max(1, item.targetSets||1);
+    const sets = [];
+    for(let i=0;i<targetSets;i++){
+      // Prefer the previous session's set at the same index (set 1 vs set 1,
+      // set 2 vs set 2, ...) so multi-set prefill mirrors how the lift was
+      // actually performed, falling back to its last set if there were fewer.
+      const prevForIndex = prevSets[i] || prevSets[prevSets.length-1] || null;
+      const base = prefillSetForType(type, prevForIndex);
+      if(type==='weight_reps' || type==='assisted' || type==='bodyweight'){
+        if(base.reps==null && item.targetRepsMax!=null) base.reps = item.targetRepsMax;
+      }
+      if(type==='weight_reps' && base.weight==null && item.targetWeight!=null) base.weight = item.targetWeight;
+      sets.push(base);
+    }
+    return {
+      exerciseId:item.exerciseId, exType:type, restSec: item.restSec??DB.settings.restDefault,
+      targetRepsMin:item.targetRepsMin??null, targetRepsMax:item.targetRepsMax??null,
+      targetWeight:item.targetWeight??null, rpeTarget:item.rpeTarget??null, notes:item.notes||'',
+      sets
+    };
+  }));
+  DB.activeSession = {
+    id:uid(), date:todayISO(), routineId: routine?routine.id:null, routineName: routine?routine.name:'Quick Workout',
+    startedAt:Date.now(), groups, notes:'',
+    // V28: present only when this workout was started from a program's
+    // "next up" slot -- absent (undefined) for every ordinary/standalone
+    // workout, old and new alike, so nothing downstream needs to know
+    // about programs unless it explicitly opts in.
+    ...(programContext ? {
+      programId: programContext.programId,
+      programName: programContext.programName,
+      programWeek: programContext.weekNumber,
+      programPhase: programContext.phase || null
+    } : {})
+  };
+  save();
+  wkNav('active-session');
+  if(routine){
+    const totalSets = groups.reduce((n,g)=> n+g.reduce((m,e)=> m+e.sets.length,0), 0);
+    toast(`Loaded ${routine.name} — ${totalSets} set${totalSets!==1?'s':''} across ${groups.reduce((n,g)=>n+g.length,0)} exercise${groups.reduce((n,g)=>n+g.length,0)!==1?'s':''}`);
+  }
+}
+
+/* Flattens the session's exercise groups into a linear list (with group/item
+   indices preserved) so the pager can jump straight to any exercise's card. */
+function sessionExerciseList(s){
+  const list = [];
+  s.groups.forEach((g,gi)=> g.forEach((entry,ii)=> list.push({gi, ii, entry})));
+  return list;
+}
+function sessionSetProgress(s){
+  let total=0, done=0;
+  s.groups.forEach(g=>g.forEach(e=> e.sets.forEach(st=>{ total++; if(st.done) done++; })));
+  return {total, done};
+}
+
+function renderActiveSession(root){
+  const s = DB.activeSession;
+  if(!s){ wkNav('home'); return; }
+  const elapsedMin = Math.floor((Date.now()-s.startedAt)/60000);
+  const flat = sessionExerciseList(s);
+  // "Current" exercise = the first one that isn't fully done yet — a simple,
+  // always-available stand-in for position in a multi-exercise workout,
+  // without needing to track/redesign this into a one-at-a-time view.
+  const currentIdx = flat.length ? (flat.findIndex(f=> !(f.entry.sets.length>0 && f.entry.sets.every(st=>st.done))) ) : -1;
+  const effectiveCurrentIdx = currentIdx===-1 ? flat.length-1 : currentIdx;
+  root.innerHTML = `
+    <div class="screen-head" style="display:flex;align-items:center;gap:10px;">
+      <button class="icon-btn" id="cancelSession" aria-label="Discard workout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      <div style="flex:1;"><h1 style="font-size:19px;">${escapeHtml(s.routineName)}</h1><div class="sub mono" id="elapsedText"><span id="elapsedMinPart">${elapsedMin} min elapsed</span>${flat.length>1? ' · Exercise '+(effectiveCurrentIdx+1)+' of '+flat.length : ''}</div></div>
+      <button class="btn btn-primary btn-sm" id="finishSession">Finish</button>
+    </div>
+    ${s.programId ? `<div class="program-context"><span class="pc-week">Week ${s.programWeek}</span>${s.programPhase?`<span class="pc-dot">·</span><span class="pc-phase">${escapeHtml(s.programPhase)}</span>`:''}<span class="pc-dot">·</span><span class="pc-name">${escapeHtml(s.programName)}</span></div>` : ''}
+    ${flat.length>1 ? `<div class="ex-pager">${flat.map((f,i)=>{
+      const e = exById(f.entry.exerciseId);
+      const allDone = f.entry.sets.length>0 && f.entry.sets.every(st=>st.done);
+      return `<button data-jump="ex-${f.gi}-${f.ii}" class="${i===effectiveCurrentIdx?'cur':''}"><span class="pn">${i+1}</span>${escapeHtml(e?e.name:'?').slice(0,16)}${allDone?`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke-width="3.4" stroke-linecap="round"><path d="M5 13l4.5 4.5L19 7"/></svg>`:''}</button>`;
+    }).join('')}</div>` : ''}
+    <div id="exBlocks"></div>
+    <button class="btn btn-block" id="addExToSession" style="margin-bottom:10px;">+ Add Exercise</button>
+    <div class="card">
+      <div class="card-title">Session Notes</div>
+      <textarea class="input" id="sessNotes" placeholder="How did it feel?">${escapeHtml(s.notes||'')}</textarea>
+    </div>
+    <div class="session-card">
+      <div class="card-title" style="margin-bottom:9px;">Session</div>
+      <div class="ses-stats" id="sesStats"></div>
+      <div class="ses-bar"><div id="sesBarFill" style="width:0%"></div></div>
+    </div>
+  `;
+  $$('.ex-pager [data-jump]').forEach(b=> b.addEventListener('click', ()=>{
+    const el = document.getElementById(b.dataset.jump);
+    if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+  }));
+  renderSessionStats();
+  function renderSessionStats(){
+    const prog = sessionSetProgress(s);
+    const pct = prog.total? Math.round(prog.done/prog.total*100) : 0;
+    const statsEl = $('#sesStats');
+    if(statsEl) statsEl.innerHTML = `
+      <div><div class="v">${prog.done}/${prog.total}</div><div class="l">Sets done</div></div>
+      <div><div class="v" style="color:var(--ember);">${fmtInt(toDisplayWeight(sessionVolume(s)))}</div><div class="l">${unitLabel()}·reps vol</div></div>
+      <div><div class="v" id="elapsedTextMini" style="color:var(--blue);">${elapsedMin}</div><div class="l">Min elapsed</div></div>
+    `;
+    const barEl = $('#sesBarFill');
+    if(barEl) barEl.style.width = pct+'%';
+  }
+  startElapsedTimer(s.startedAt);
+  $('#cancelSession').addEventListener('click', ()=>{
+    openConfirmModal('This will permanently discard this workout — nothing will be saved.', ()=>{
+      stopElapsedTimer(); stopRestTimer(); DB.activeSession=null; save(); wkNav('home');
+    }, {title:'Discard Workout?', confirmLabel:'Discard', danger:true});
+  });
+  $('#finishSession').addEventListener('click', finishActiveSession);
+  $('#addExToSession').addEventListener('click', ()=>{
+    openExercisePickerModal(exercise=>{
+      s.groups.push([{exerciseId:exercise.id, exType:exercise.type, restSec:DB.settings.restDefault, sets:[blankSetForType(exercise.type)]}]);
+      save(); renderActiveSession(root);
+    });
+  });
+  $('#sessNotes').addEventListener('input', e=>{ s.notes=e.target.value; save(); });
+  renderExBlocks();
+
+  function renderExBlocks(){
+    const wrap = $('#exBlocks');
+    // V26: highlight exactly one exercise block as "current" -- the first
+    // one (in display order) that still has an unfinished set -- and, within
+    // it, the first unfinished set row. Every other row is either "done"
+    // (set.done, pre-existing) or plain "upcoming" (no special class).
+    // Purely a rendering pass over data that already exists on each set;
+    // nothing here is stored.
+    let currentAssigned = false;
+    wrap.innerHTML = s.groups.map((g,gi)=> g.map((exEntry, ii)=>{
+      const e = exById(exEntry.exerciseId);
+      const label = g.length>1 ? String.fromCharCode(65+gi)+(ii+1) : '';
+      const prev = e ? lastSessionLineForExercise(e.id, s.id) : null;
+      const prevSets = e ? previousSetsForExercise(e.id, s.id) : [];
+      const targetLine = entryTargetLine(exEntry);
+      const firstUndoneIdx = exEntry.sets.findIndex(st=>!st.done);
+      const isCurrentBlock = firstUndoneIdx!==-1 && !currentAssigned;
+      if(isCurrentBlock) currentAssigned = true;
+      const suggestion = isCurrentBlock ? suggestNextLoad(exEntry, prevSets) : null;
+      return `<div class="exercise-block ${isCurrentBlock?'current':''}" id="ex-${gi}-${ii}" data-gi="${gi}" data-ii="${ii}">
+        <div class="ex-head">
+          <div style="min-width:0;">
+            <div><span class="ex-tag">${label}</span> <span class="ex-name">${escapeHtml(e?e.name:'?')}</span> <span class="chip current-chip"${isCurrentBlock?'':' hidden'}>Now</span></div>
+            ${targetLine? `<div class="ex-target">${escapeHtml(targetLine)}</div>` : ''}
+          </div>
+          <div class="ex-head-actions">
+            ${ii===0 ? `
+            <button class="icon-btn ex-act-btn" data-moveex="${gi}:up" title="Move up" aria-label="Move exercise up" ${gi===0?'disabled':''}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+            <button class="icon-btn ex-act-btn" data-moveex="${gi}:down" title="Move down" aria-label="Move exercise down" ${gi===s.groups.length-1?'disabled':''}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12l7 7 7-7"/></svg></button>
+            ` : ''}
+            <button class="icon-btn ex-act-btn" data-replaceex="${gi}:${ii}" title="Replace exercise" aria-label="Replace exercise"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
+            <button class="icon-btn ex-act-btn" data-rmex="${gi}:${ii}" title="Remove exercise" aria-label="Remove exercise"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          </div>
+        </div>
+        ${exEntry.notes? `<div class="ex-notes">${escapeHtml(exEntry.notes)}</div>` : ''}
+        ${prev ? `<div class="ex-lasttime"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span class="ll-lbl">Last time</span><span class="ll-val">${escapeHtml(prev.line)}</span></div>` : `<div class="ex-lasttime"><span class="ll-lbl">Previous</span><span class="ll-val">No previous workout</span></div>`}
+        ${suggestion ? `<div class="ex-suggest ex-suggest-${suggestion.type}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SUGGEST_ICON_PATHS[suggestion.type]}</svg><span class="ll-lbl">${SUGGEST_LABELS[suggestion.type]}</span><span class="ll-val">${escapeHtml(suggestion.message)}</span></div>` : ''}
+        ${setHeaderRow(exEntry.exType)}
+        <div class="setsWrap">${exEntry.sets.map((set,si)=> setRowHtml(exEntry.exType, set, si, gi, ii, prevSets[si], isCurrentBlock && si===firstUndoneIdx)).join('')}</div>
+        <div class="ex-foot">
+          <button class="btn btn-sm btn-ghost" data-addset="${gi}:${ii}" style="flex:1;">+ Add Set</button>
+          ${exEntry.exType==='weight_reps' ? `<button class="btn btn-sm btn-ghost" data-addwarmup="${gi}:${ii}" style="flex:none;">+ Warm-up</button>` : ''}
+          <button class="btn btn-sm btn-ghost" data-restcfg="${gi}:${ii}" style="flex:none;">Rest: ${exEntry.restSec}s</button>
+        </div>
+      </div>`;
+    }).join('')).join('');
+
+    $$('[data-moveex]').forEach(b=> b.addEventListener('click', ()=>{
+      const [giRaw, dir] = b.dataset.moveex.split(':');
+      const gi = parseInt(giRaw);
+      const target = dir==='up' ? gi-1 : gi+1;
+      if(target<0 || target>=s.groups.length) return;
+      const [moved] = s.groups.splice(gi,1);
+      s.groups.splice(target,0,moved);
+      save();
+      // Full re-render (like Add Exercise already does) rather than just
+      // renderExBlocks(), since the exercise pager above is built from group
+      // order at the top of renderActiveSession and needs to reflect the move.
+      renderActiveSession(root);
+    }));
+    $$('[data-replaceex]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.replaceex.split(':').map(Number);
+      const entry = s.groups[gi][ii];
+      openReplaceExerciseModal(entry, (alt)=>{
+        entry.exerciseId = alt.id;
+        if(alt.type!==entry.exType){
+          entry.exType = alt.type;
+          entry.sets = entry.sets.map(()=> blankSetForType(alt.type));
+        }
+        save(); renderExBlocks(); renderSessionStats();
+        toast('Replaced with '+alt.name);
+      });
+    }));
+    $$('[data-addwarmup]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.addwarmup.split(':').map(Number);
+      const entry = s.groups[gi][ii];
+      const workingSet = entry.sets.find(st=> st.tag!=='Warmup' && st.weight!=null)
+        || (entry.targetWeight!=null ? {weight:entry.targetWeight, reps:entry.targetRepsMax||8} : null);
+      if(!workingSet){ toast('Enter a working weight first, then add warm-ups'); return; }
+      const ramp = warmupSets(toDisplayWeight(workingSet.weight), workingSet.reps||8);
+      const warmupEntries = ramp.map(r=> ({weight: fromDisplayWeight(r.weight), reps:r.reps, done:false, tag:'Warmup', rpe:null}));
+      entry.sets.unshift(...warmupEntries);
+      save(); renderExBlocks(); renderSessionStats();
+    }));
+    $$('[data-rmex]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.rmex.split(':').map(Number);
+      s.groups[gi].splice(ii,1);
+      if(s.groups[gi].length===0) s.groups.splice(gi,1);
+      save(); renderExBlocks(); renderSessionStats();
+    }));
+    $$('[data-addset]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.addset.split(':').map(Number);
+      const entry = s.groups[gi][ii];
+      const last = entry.sets[entry.sets.length-1];
+      // Copy weight/reps/etc. from the previous set as a starting point, but a
+      // new set is always an un-done "Working" set — it must never silently
+      // inherit Warmup/Drop/Failure from whatever the last set happened to be.
+      entry.sets.push(last? {...last, done:false, tag:'Working'} : blankSetForType(entry.exType));
+      save(); renderExBlocks(); renderSessionStats();
+    }));
+    $$('[data-restcfg]').forEach(b=> b.addEventListener('click', ()=>{
+      const [gi,ii] = b.dataset.restcfg.split(':').map(Number);
+      const entry = s.groups[gi][ii];
+      openRestTimeModal(entry.restSec, (newVal)=>{ entry.restSec=newVal; save(); renderExBlocks(); });
+    }));
+    wireSetRowEvents();
+  }
+
+  // V26: recomputes which exercise block / set row should carry the
+  // "current" highlight after a done-toggle, WITHOUT calling renderExBlocks()
+  // -- that full rebuild is deliberately avoided on check-toggle (see FIX #1
+  // below) to preserve scroll position/focus on mobile. This only flips a
+  // few classList/hidden values on already-rendered nodes.
+  function swapRowMarkup(row, isCurrent){
+    // V29's current-set row uses structurally different markup (stepper
+    // wrapper + expand button) from a plain row, not just a different
+    // class -- a class-only toggle here left the newly-current row's bare
+    // <input> elements with .set-row.current's flex-wrap styling applied
+    // but no stepper wrapper to size against, collapsing each input onto
+    // its own full-width line. Regenerating just the two affected rows'
+    // outerHTML (not the whole exercise list) keeps this cheap while
+    // fixing that.
+    const gi = parseInt(row.dataset.gi), ii = parseInt(row.dataset.ii), si = parseInt(row.dataset.si);
+    const entry = s.groups[gi][ii];
+    const e = exById(entry.exerciseId);
+    const prevSet = e ? previousSetsForExercise(e.id, s.id)[si] : null;
+    row.outerHTML = setRowHtml(entry.exType, entry.sets[si], si, gi, ii, prevSet, isCurrent);
+    // outerHTML replaces `row` with a fresh, listener-less element -- wire
+    // only that one row rather than re-scanning/re-wiring every row in the
+    // list (which would stack duplicate listeners on rows that didn't change).
+    const wrap = $('#exBlocks');
+    const fresh = $(`.set-row[data-gi="${gi}"][data-ii="${ii}"][data-si="${si}"]`, wrap);
+    if(fresh) wireRow(fresh);
+  }
+  function advanceCurrentHighlight(){
+    const wrap = $('#exBlocks');
+    if(!wrap) return;
+    const prevBlock = $('.exercise-block.current', wrap);
+    if(prevBlock){ prevBlock.classList.remove('current'); const chip = $('.current-chip', prevBlock); if(chip) chip.hidden = true; }
+    const prevRow = $('.set-row.current', wrap);
+    if(prevRow) swapRowMarkup(prevRow, false);
+    outer: for(let gi=0; gi<s.groups.length; gi++){
+      for(let ii=0; ii<s.groups[gi].length; ii++){
+        const entry = s.groups[gi][ii];
+        const si = entry.sets.findIndex(st=>!st.done);
+        if(si===-1) continue;
+        const block = $('#ex-'+gi+'-'+ii, wrap);
+        if(block){ block.classList.add('current'); const chip = $('.current-chip', block); if(chip) chip.hidden = false; }
+        const row = $(`.set-row[data-gi="${gi}"][data-ii="${ii}"][data-si="${si}"]`, wrap);
+        if(row) swapRowMarkup(row, true);
+        break outer;
+      }
+    }
+  }
+
+  function wireSetRowEvents(){
+    $$('.set-row').forEach(wireRow);
+  }
+  function wireRow(row){
+      const gi = parseInt(row.dataset.gi), ii = parseInt(row.dataset.ii), si = parseInt(row.dataset.si);
+      const entry = s.groups[gi][ii];
+      const set = entry.sets[si];
+      // FIX #1: toggling done/tag only updates this single row's DOM — no full list rebuild,
+      // so scroll position, keyboard, and input focus are preserved on mobile.
+      const chk = $('.set-check', row);
+      const toggleDone = ()=>{
+        const turningOn = !set.done;
+        set.done = turningOn;
+        chk.classList.toggle('done', set.done);
+        chk.setAttribute('aria-pressed', String(set.done));
+        chk.setAttribute('aria-label', `Mark set ${si+1} ${set.done?'not done':'done'}`);
+        row.classList.toggle('done', set.done);
+        save();
+        renderSessionStats();
+        advanceCurrentHighlight(); // cheap class-only update, not a full renderExBlocks() -- see FIX #1
+        if(turningOn){
+          if(entry.restSec>0){
+            const exForRest = exById(entry.exerciseId);
+            startRestTimer(entry.restSec, exForRest ? exForRest.name : null);
+          }
+          announcePRIfAny(entry, set);
+        }
+      };
+      if(chk){
+        chk.addEventListener('click', toggleDone);
+        // .set-check is a div with role="button" for the checkmark visual --
+        // native <button> semantics aren't used here to keep the custom
+        // circular/checkmark styling, so Enter/Space activation has to be
+        // wired manually to make it keyboard-operable.
+        chk.addEventListener('keydown', (ev)=>{
+          if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); toggleDone(); }
+        });
+      }
+      $$('input', row).forEach(inp=>{
+        inp.addEventListener('input', ()=>{
+          const field = inp.dataset.field;
+          const v = inp.value===''? null : parseFloat(inp.value);
+          if(field==='weight') set.weight = v===null? null : fromDisplayWeight(v);
+          else if(field==='assistWeight') set.assistWeight = v===null? null : fromDisplayWeight(v);
+          else set[field] = v;
+          save();
+        });
+        // Faster set logging: hitting Enter/Return in a set's field (a
+        // hardware keyboard, or a mobile IME whose "done"/"go" action fires
+        // a keydown Enter) marks the set done and dismisses the keyboard,
+        // instead of requiring a separate tap on the checkmark. Only
+        // completes the set forward (never un-marks it), so it can't
+        // accidentally undo a set someone already checked off.
+        inp.addEventListener('keydown', (ev)=>{
+          if(ev.key!=='Enter') return;
+          ev.preventDefault();
+          inp.blur();
+          if(!set.done) toggleDone();
+        });
+      });
+      // V29: stepper +/- buttons adjust the adjacent input's value, then
+      // dispatch a real 'input' event -- so they run through the exact same
+      // listener above (parse, unit conversion, save) instead of duplicating
+      // that logic. Base value falls back to the field's ghost placeholder
+      // (last session's number) when the field is still empty, so tapping +
+      // from blank starts from something meaningful rather than from 0.
+      $$('.stepper-btn[data-stepfield]', row).forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const field = btn.dataset.stepfield;
+          const step = parseFloat(btn.dataset.step);
+          const inp = $(`input[data-field="${field}"]`, row);
+          if(!inp) return;
+          const base = inp.value!=='' ? parseFloat(inp.value) : (parseFloat(inp.placeholder)||0);
+          const next = Math.max(0, (Number.isFinite(base)?base:0) + step);
+          inp.value = field==='reps' ? String(Math.round(next)) : fmt1(next);
+          inp.dispatchEvent(new Event('input', {bubbles:true}));
+        });
+      });
+      const expandBtn = $('.set-expand', row);
+      if(expandBtn) expandBtn.addEventListener('click', ()=>{
+        const e = exById(entry.exerciseId);
+        const prevSets = e ? previousSetsForExercise(e.id, s.id) : [];
+        openSetDetailModal({
+          exerciseName: e ? e.name : '?', entry, set, si,
+          prevSet: prevSets[si], suggestion: suggestNextLoad(entry, prevSets),
+          onChange: ()=>{ save(); renderExBlocks(); renderSessionStats(); },
+          onToggleDone: toggleDone
+        });
+      });
+      const tagBtn = $('.set-tagbtn', row);
+      if(tagBtn) tagBtn.addEventListener('click', ()=>{
+        const order = ['Working','Warmup','Drop','Failure'];
+        const cur = order.indexOf(set.tag); set.tag = order[(cur+1)%order.length];
+        tagBtn.textContent = setTagAbbrev(set.tag);
+        tagBtn.title = 'Tag: '+set.tag;
+        save();
+        renderSessionStats(); // warm-up/working toggles change what counts toward volume
+      });
+      const delBtn = $('.set-del', row);
+      if(delBtn){
+        if(entry.sets.length<=1) delBtn.disabled = true;
+        delBtn.addEventListener('click', ()=>{
+          if(entry.sets.length<=1){
+            toast('An exercise needs at least one set — remove the exercise instead');
+            return;
+          }
+          const [removed] = entry.sets.splice(si,1);
+          save();
+          renderExBlocks(); // re-renders with sets re-indexed and stats recomputed below
+          renderSessionStats();
+          toast('Set deleted', {action:{label:'Undo', onClick: ()=>{
+            // Re-insert at its original position — if sets were added/removed
+            // since, si may now be past the end, so clamp rather than throw.
+            entry.sets.splice(Math.min(si, entry.sets.length), 0, removed);
+            save();
+            renderExBlocks();
+            renderSessionStats();
+          }}});
+        });
+      }
+  }
+}
+
+function openRestTimeModal(currentSec, onConfirm){
+  openModal(`
+    <div class="modal-head"><h3>Rest Time</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="field"><label>Seconds</label><input class="input" id="restSecInput" type="number" value="${currentSec}"></div>
+    <div class="row">
+      <button class="btn btn-ghost" id="restCancel">Cancel</button>
+      <button class="btn btn-primary" id="restConfirm">Save</button>
+    </div>
+  `, {id:'restcfg', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('restcfg'));
+  $('#restCancel').addEventListener('click', ()=> closeModal('restcfg'));
+  $('#restConfirm').addEventListener('click', ()=>{
+    const val = parseInt($('#restSecInput').value);
+    closeModal('restcfg');
+    if(!isNaN(val) && val>=0) onConfirm(val);
+  });
+}
+
+/* FIX #2: generic confirmation modal — replaces every native confirm()/prompt() in the app
+   so dialogs match the app's design and never block/freeze the WebView on mobile. */
+function openConfirmModal(message, onConfirm, opts={}){
+  const title = opts.title || 'Are you sure?';
+  const confirmLabel = opts.confirmLabel || 'Confirm';
+  const danger = !!opts.danger;
+  openModal(`
+    <div class="modal-head"><h3>${escapeHtml(title)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 18px;">${escapeHtml(message)}</p>
+    <div class="row">
+      <button class="btn btn-ghost" id="cfCancel">Cancel</button>
+      <button class="btn ${danger?'btn-danger':'btn-primary'}" id="cfOk">${escapeHtml(confirmLabel)}</button>
+    </div>
+  `, {id:'confirm', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('confirm'));
+  $('#cfCancel').addEventListener('click', ()=> closeModal('confirm'));
+  $('#cfOk').addEventListener('click', ()=>{ closeModal('confirm'); onConfirm(); });
+}
+
+/* Shown when a backup import fails validateDB(). Lists the specific
+   problems (no raw stack traces) and makes clear the current data was
+   never touched. */
+function openImportErrorModal(errors){
+  openModal(`
+    <div class="modal-head"><h3>Import Failed</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 10px;">This file couldn't be imported. Your current data was <b>not</b> changed.</p>
+    <div class="card" style="max-height:220px;overflow-y:auto;">
+      ${errors.slice(0,20).map(e=>`<div style="font-size:12.5px;color:var(--muted);padding:5px 0;border-top:1px solid var(--line);">${escapeHtml(e)}</div>`).join('')}
+      ${errors.length>20? `<div style="font-size:12px;color:var(--faint);padding-top:6px;">+ ${errors.length-20} more</div>` : ''}
+    </div>
+    <button class="btn btn-block" id="ieClose" style="margin-top:14px;">OK</button>
+  `, {id:'importerr', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('importerr'));
+  $('#ieClose').addEventListener('click', ()=> closeModal('importerr'));
+}
+
+/* Shown once, at startup, only when load() couldn't read the existing save
+   (see handleCorruptedStore). Deliberately has no "close via backdrop tap"
+   affordance beyond the single Continue button — there's nothing else the
+   user can do here, the app is already running on a fresh DB, and the
+   original data is sitting safely under RECOVERY_KEY regardless of what
+   they click. */
+function openDataRecoveryWarningModal(){
+  openModal(`
+    <div class="modal-head"><h3>Couldn't read your saved data</h3></div>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 10px;">E1FITNESS found existing data on this device but couldn't read it — it may have been corrupted while saving.</p>
+    <p style="font-size:14px;line-height:1.5;color:var(--paper);margin:0 0 18px;"><b>Nothing has been deleted.</b> A copy of the original data has been kept on this device so it isn't lost. You're continuing with a fresh app for now.</p>
+    <button class="btn btn-primary btn-block" id="drwOk">Continue</button>
+  `, {id:'datarecovery', center:true});
+  $('#drwOk').addEventListener('click', ()=> closeModal('datarecovery'));
+}
+
+function setHeaderRow(type){
+  const u = unitLabel();
+  const cols = {
+    weight_reps: [u.toUpperCase(), 'REPS'],
+    bodyweight: ['REPS'],
+    assisted: ['ASSIST '+u.toUpperCase(), 'REPS'],
+    duration: ['SECONDS'],
+    cardio: ['DIST', 'SEC', 'KCAL']
+  }[type] || ['VALUE'];
+  const rpeCol = DB.settings.showRPE ? '<span>RPE</span>' : '';
+  return `<div class="set-hdr"><span></span>${cols.map(c=>`<span>${c}</span>`).join('')}${rpeCol}<span></span><span></span><span></span></div>`;
+}
+
+/* prevSet: this exercise's set at the same index from its most recent
+   session (or null if never performed / no set at that index). Its values
+   are shown as ghost placeholder text — visible for reference but never
+   pre-filled into the field, so it can't be mistaken for entered data and
+   never interferes with typing (see the active-workout "previous
+   performance" requirement). */
+function setRowHtml(type, set, si, gi, ii, prevSet, isCurrent){
+  const u = unitLabel();
+  const ph = (field)=>{
+    if(!prevSet) return '';
+    if(field==='weight') return prevSet.weight!=null? fmt1(toDisplayWeight(prevSet.weight)) : '';
+    if(field==='reps') return prevSet.reps!=null? String(prevSet.reps) : '';
+    if(field==='assistWeight') return prevSet.assistWeight!=null? fmt1(toDisplayWeight(prevSet.assistWeight)) : '';
+    if(field==='durationSec') return prevSet.durationSec!=null? String(prevSet.durationSec) : '';
+    if(field==='distance') return prevSet.distance!=null? String(prevSet.distance) : '';
+    if(field==='calories') return prevSet.calories!=null? String(prevSet.calories) : '';
+    return '';
+  };
+  let fields = '';
+  if(type==='weight_reps'){
+    const weightInput = `<input type="number" step="0.5" inputmode="decimal" data-field="weight" placeholder="${ph('weight')||u}" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">`;
+    const repsInput = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+    // V29: the set you're actually working on gets tap-to-adjust +/- steppers
+    // (matches the reference design's focused set-entry pattern); every
+    // other row stays a plain compact field -- same inputs either way, nothing
+    // about direct typing changes, so existing save/keyboard wiring is untouched.
+    fields = isCurrent
+      ? `<div class="stepper set-stepper"><button type="button" class="stepper-btn" data-stepfield="weight" data-step="-5" aria-label="Decrease weight">−</button>${weightInput}<button type="button" class="stepper-btn" data-stepfield="weight" data-step="5" aria-label="Increase weight">+</button></div>
+      <div class="stepper set-stepper"><button type="button" class="stepper-btn" data-stepfield="reps" data-step="-1" aria-label="Decrease reps">−</button>${repsInput}<button type="button" class="stepper-btn" data-stepfield="reps" data-step="1" aria-label="Increase reps">+</button></div>`
+      : `${weightInput}${repsInput}`;
+  } else if(type==='bodyweight'){
+    fields = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+  } else if(type==='assisted'){
+    fields = `<input type="number" step="0.5" inputmode="decimal" data-field="assistWeight" placeholder="${ph('assistWeight')||u}" value="${set.assistWeight!=null?fmt1(toDisplayWeight(set.assistWeight)):''}">
+      <input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="reps" placeholder="${ph('reps')||'reps'}" value="${set.reps??''}">`;
+  } else if(type==='duration'){
+    fields = `<input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">`;
+  } else if(type==='cardio'){
+    fields = `<input type="number" step="0.1" inputmode="decimal" data-field="distance" placeholder="${ph('distance')||'mi/km'}" value="${set.distance??''}">
+      <input type="number" step="1" inputmode="numeric" data-field="durationSec" placeholder="${ph('durationSec')||'sec'}" value="${set.durationSec??''}">
+      <input type="number" step="1" inputmode="numeric" enterkeyhint="done" data-field="calories" placeholder="${ph('calories')||'kcal'}" value="${set.calories??''}">`;
+  }
+  const rpeField = DB.settings.showRPE
+    ? `<input type="number" step="0.5" min="1" max="10" class="rpe-input" data-field="rpe" placeholder="–" value="${set.rpe??''}">`
+    : '';
+  const expandBtn = (isCurrent && type==='weight_reps')
+    ? `<button class="set-expand" data-setdetail="${gi}:${ii}:${si}" title="Set details" aria-label="Open set ${si+1} details"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>`
+    : '';
+  return `<div class="set-row ${set.done?'done':''} ${isCurrent?'current':''}" data-gi="${gi}" data-ii="${ii}" data-si="${si}">
+    <div class="set-idx">${si+1}</div>
+    ${fields}
+    ${rpeField}
+    ${expandBtn}
+    <button class="set-tagbtn" title="Tag: ${escapeHtml(set.tag||'Working')}" aria-label="Set ${si+1} tag: ${escapeHtml(set.tag||'Working')}, tap to change">${setTagAbbrev(set.tag)}</button>
+    <div class="set-check ${set.done?'done':''}" role="button" tabindex="0" aria-label="Mark set ${si+1} ${set.done?'not done':'done'}" aria-pressed="${!!set.done}"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
+    <button class="set-del" title="Delete this set" aria-label="Delete set ${si+1}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
+  </div>`;
+}
+function setTagAbbrev(tag){
+  return {Working:'W', Warmup:'WU', Drop:'D', Failure:'F'}[tag] || 'W';
+}
+
+/* Full-screen-style set-focus modal (weight_reps sets only) -- the compact
+   inline stepper on .set-row.current already covers fast logging, this is
+   the larger "step back and look at just this set" view from the reference
+   design (LAST TIME / TARGET / TODAY, a bigger stepper, and the same
+   progression suggestion as the inline card). It edits the exact same
+   `set`/`entry` objects the inline row does, so there's no separate copy of
+   the data to keep in sync -- onChange just re-renders the exercise list
+   from the shared session state. */
+function openSetDetailModal({exerciseName, entry, set, si, prevSet, suggestion, onChange, onToggleDone}){
+  const u = unitLabel();
+  const targetLine = entryTargetLine(entry) || 'No target set';
+  const lastLine = prevSet && prevSet.weight!=null && prevSet.reps!=null ? `${fmt1(toDisplayWeight(prevSet.weight))} ${u} × ${prevSet.reps}` : '—';
+  const todayLine = set.weight!=null && set.reps!=null ? `${fmt1(toDisplayWeight(set.weight))} ${u} × ${set.reps}` : 'Not logged yet';
+  const back = openModal(`
+    <div class="modal-head">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0;">
+        <div class="icon-badge" style="background:var(--blue-dim);color:var(--blue-tint);"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6.5 6.5l11 11"/><path d="M4 9l3-3 2.5 2.5-3 3zM20 15l-3 3-2.5-2.5 3-3z"/></svg></div>
+        <div style="min-width:0;"><h3 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(exerciseName)}</h3><div class="sub">Set ${si+1} of ${entry.sets.length}</div></div>
+      </div>
+      <button class="icon-btn" id="mClose" aria-label="Close">✕</button>
+    </div>
+    <div class="ms-detail-grid" style="grid-template-columns:repeat(3,1fr);padding:0 0 4px;margin-bottom:12px;">
+      <div style="display:flex;flex-direction:column;gap:2px;"><span class="ms-detail-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">Last Time</span><span class="mono" style="font-size:12.5px;">${escapeHtml(lastLine)}</span></div>
+      <div style="display:flex;flex-direction:column;gap:2px;"><span class="ms-detail-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">Target</span><span class="mono" style="font-size:12.5px;">${escapeHtml(targetLine)}</span></div>
+      <div style="display:flex;flex-direction:column;gap:2px;"><span class="ms-detail-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-family:'Oswald','Arial Narrow',Impact,sans-serif;">Today</span><span class="mono" style="font-size:12.5px;color:var(--blue-tint);">${escapeHtml(todayLine)}</span></div>
+    </div>
+    ${suggestion ? `<div class="ex-suggest ex-suggest-${suggestion.type}" style="margin:0 0 14px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SUGGEST_ICON_PATHS[suggestion.type]}</svg><span class="ll-lbl">${SUGGEST_LABELS[suggestion.type]}</span><span class="ll-val">${escapeHtml(suggestion.message)}</span></div>` : ''}
+    <div class="field"><label>Weight (${u})</label>
+      <div class="stepper" style="height:52px;">
+        <button type="button" class="stepper-btn" id="sdWMinus" style="width:52px;height:52px;font-size:24px;" aria-label="Decrease weight">−</button>
+        <input type="number" step="0.5" inputmode="decimal" id="sdWeight" style="font-size:26px;" value="${set.weight!=null?fmt1(toDisplayWeight(set.weight)):''}">
+        <button type="button" class="stepper-btn" id="sdWPlus" style="width:52px;height:52px;font-size:24px;" aria-label="Increase weight">+</button>
+      </div>
+    </div>
+    <div class="field"><label>Reps</label>
+      <div class="stepper" style="height:52px;">
+        <button type="button" class="stepper-btn" id="sdRMinus" style="width:52px;height:52px;font-size:24px;" aria-label="Decrease reps">−</button>
+        <input type="number" step="1" inputmode="numeric" id="sdReps" style="font-size:26px;" value="${set.reps??''}">
+        <button type="button" class="stepper-btn" id="sdRPlus" style="width:52px;height:52px;font-size:24px;" aria-label="Increase reps">+</button>
+      </div>
+    </div>
+    <label class="row" style="align-items:center;gap:10px;margin-bottom:16px;font-size:13.5px;">
+      <input type="checkbox" id="sdDone" ${set.done?'checked':''} style="width:20px;height:20px;flex:none;accent-color:var(--blue);"> Mark as completed
+    </label>
+    <button class="btn btn-primary btn-block" id="sdLog" style="margin-bottom:8px;">Log Set</button>
+    <button class="btn btn-ghost btn-block" id="sdCancel">Cancel</button>
+  `, {id:'setdetail', center:true});
+  back.classList.add('workout-dark');
+  const wInp = $('#sdWeight', back), rInp = $('#sdReps', back);
+  $('#sdWMinus', back).addEventListener('click', ()=>{ wInp.value = fmt1(Math.max(0,(parseFloat(wInp.value)||0)-5)); });
+  $('#sdWPlus', back).addEventListener('click', ()=>{ wInp.value = fmt1((parseFloat(wInp.value)||0)+5); });
+  $('#sdRMinus', back).addEventListener('click', ()=>{ rInp.value = String(Math.max(0,(parseInt(rInp.value)||0)-1)); });
+  $('#sdRPlus', back).addEventListener('click', ()=>{ rInp.value = String((parseInt(rInp.value)||0)+1); });
+  $('#sdCancel', back).addEventListener('click', ()=> closeModal('setdetail'));
+  $('#sdLog', back).addEventListener('click', ()=>{
+    const wv = wInp.value===''? null : parseFloat(wInp.value);
+    const rv = rInp.value===''? null : parseInt(rInp.value);
+    set.weight = wv===null? null : fromDisplayWeight(wv);
+    set.reps = rv;
+    const shouldBeDone = $('#sdDone', back).checked;
+    if(shouldBeDone!==!!set.done) onToggleDone(); // handles save() + rest timer + PR toast
+    onChange(); // save() + full re-render, so the row reflects the new weight/reps either way
+    closeModal('setdetail');
+  });
+}
+
+/* ---------------- Rest Timer ----------------
+   FIX #6: rewritten for lifecycle reliability. State lives in a single object
+   keyed off a wall-clock end timestamp (endAt) rather than a per-tick
+   decrementing counter — remaining time is always *computed* from Date.now(),
+   never accumulated, so background-tab throttling can't cause drift, jumps,
+   or acceleration. A monotonically increasing token guards against any stray
+   interval callback ever acting after it's been superseded, so only one
+   timer can ever be "live" no matter how it's started/stopped. All start and
+   stop paths funnel through startRestTimer()/stopRestTimer() — nothing else
+   touches restTimer.interval or #restTimerRoot directly. */
+let restTimer = {endAt:0, total:0, interval:null, nextLabel:null};
+let restTimerToken = 0;
+function stopRestTimer(){
+  restTimerToken++;
+  if(restTimer.interval){ clearInterval(restTimer.interval); restTimer.interval=null; }
+  const root = $('#restTimerRoot');
+  if(root) root.innerHTML='';
+}
+function startRestTimer(seconds, nextLabel){
+  stopRestTimer(); // guarantees at most one timer is ever active
+  const myToken = restTimerToken;
+  restTimer = {endAt: Date.now()+seconds*1000, total: seconds, interval:null, nextLabel: nextLabel||null};
+  renderRestTimer();
+  restTimer.interval = setInterval(()=>{
+    if(myToken!==restTimerToken){ clearInterval(restTimer.interval); return; } // stale tick safety net
+    const remaining = Math.ceil((restTimer.endAt-Date.now())/1000);
+    if(remaining<=0){
+      stopRestTimer();
+      playRestBeep();
+      toast('Rest complete — back to it!');
+      return;
+    }
+    renderRestTimer();
+  },1000);
+}
+/* FIX #5: real short oscillator beep instead of an AudioContext created and thrown away.
+   Wrapped in try/catch since some mobile browsers block audio before any user gesture. */
+// iOS Safari (and most mobile browsers) heavily throttle or fully suspend
+// setInterval while a tab is backgrounded or the screen is locked. The
+// countdown math is already timestamp-based so it's never actually wrong,
+// but without this, the DISPLAY sits frozen/stale until the next natural
+// 1s tick fires after the page becomes visible again — which itself may be
+// delayed — and reads to the user as the timer "jumping" or "freezing".
+// This forces an immediate resync from the real end timestamp the moment
+// the page regains visibility, instead of waiting on interval accuracy.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState!=='visible' || !restTimer.interval) return;
+  const remaining = Math.ceil((restTimer.endAt-Date.now())/1000);
+  if(remaining<=0){
+    stopRestTimer();
+    playRestBeep();
+    toast('Rest complete — back to it!');
+  } else {
+    renderRestTimer();
+  }
+});
+function playRestBeep(){
+  try{
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime+0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+0.18);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime+0.2);
+    osc.onended = ()=> ctx.close();
+  }catch(e){ /* audio unavailable — toast still informs the user */ }
+}
+function renderRestTimer(){
+  const remaining = Math.max(0, Math.ceil((restTimer.endAt-Date.now())/1000));
+  const pct = clamp((remaining/restTimer.total)*100, 0, 100);
+  const r = 18, circumference = 2*Math.PI*r;
+  const dashOffset = circumference * (1 - pct/100);
+  const m = Math.floor(remaining/60), sec = remaining%60;
+  const root = $('#restTimerRoot');
+  if(!root) return;
+  root.innerHTML = `
+    <div class="rest-timer">
+      <div class="rt-ring">
+        <svg width="44" height="44" viewBox="0 0 44 44">
+          <circle cx="22" cy="22" r="${r}" fill="none" stroke="var(--surface-3)" stroke-width="4"/>
+          <circle cx="22" cy="22" r="${r}" fill="none" stroke="var(--blue)" stroke-width="4" stroke-linecap="round"
+            stroke-dasharray="${circumference.toFixed(1)}" stroke-dashoffset="${dashOffset.toFixed(1)}"/>
+        </svg>
+        <div class="rt-num">${m}:${sec.toString().padStart(2,'0')}</div>
+      </div>
+      <div class="rt-info">
+        <div class="rt-lbl">Resting</div>
+        <div class="rt-next">${restTimer.nextLabel? 'Next: '+escapeHtml(restTimer.nextLabel) : 'Get ready for your next set'}</div>
+      </div>
+      <button class="rt-plus" id="restPlus30" aria-label="Add 30 seconds to rest">+30</button>
+      <button class="rt-skip" id="skipRest" aria-label="Skip rest">Skip</button>
+    </div>`;
+  const skip = $('#skipRest');
+  if(skip) skip.addEventListener('click', stopRestTimer);
+  const plus = $('#restPlus30');
+  if(plus) plus.addEventListener('click', ()=>{ restTimer.endAt += 30000; restTimer.total += 30; renderRestTimer(); });
+}
+
+/* FIX #4: live elapsed-time ticker for the active workout — updates the on-screen
+   text every 30s without re-rendering the whole session (no scroll/focus disruption). */
+let elapsedTimerInterval = null;
+function startElapsedTimer(startedAt){
+  stopElapsedTimer();
+  elapsedTimerInterval = setInterval(()=>{
+    const el = $('#elapsedMinPart');
+    if(!el || !DB.activeSession){ stopElapsedTimer(); return; }
+    const mins = Math.floor((Date.now()-startedAt)/60000);
+    el.textContent = mins+' min elapsed';
+  }, 30000);
+}
+function stopElapsedTimer(){
+  if(elapsedTimerInterval){ clearInterval(elapsedTimerInterval); elapsedTimerInterval=null; }
+}
+
+/* ---------------- Finish session ---------------- */
+function finishActiveSession(){
+  const s = DB.activeSession;
+  const hasLoggedSet = s.groups.some(g=>g.some(e=>e.sets.some(st=>st.done)));
+  if(!hasLoggedSet){
+    openConfirmModal('You haven\u2019t marked any sets as done yet. Finish this workout anyway?', completeSession, {title:'No Sets Logged', confirmLabel:'Finish Anyway'});
+    return;
+  }
+  openFinishSheet();
+}
+function openFinishSheet(){
+  const s = DB.activeSession;
+  const prog = sessionSetProgress(s);
+  const mins = Math.max(1, Math.round((Date.now()-s.startedAt)/60000));
+  const exCount = s.groups.reduce((n,g)=>n+g.length,0);
+  openModal(`
+    <div class="modal-head"><h3>${escapeHtml(s.routineName)} Complete</h3><button class="icon-btn" id="mClose" aria-label="Close">\u2715</button></div>
+    <div class="stat-grid">
+      <div class="stat-box"><div class="sv" style="color:var(--blue);">${mins}</div><div class="sl">Minutes</div></div>
+      <div class="stat-box"><div class="sv" style="color:var(--ember);">${fmtInt(toDisplayWeight(sessionVolume(s)))}</div><div class="sl">${unitLabel()}\u00b7reps volume</div></div>
+      <div class="stat-box"><div class="sv">${prog.done}/${prog.total}</div><div class="sl">Sets done</div></div>
+      <div class="stat-box"><div class="sv">${exCount}</div><div class="sl">Exercises</div></div>
+    </div>
+    <div class="row" style="margin-top:16px;">
+      <button class="btn btn-ghost" id="finishBack">Back</button>
+      <button class="btn" id="finishSave" style="background:var(--green);border-color:var(--green);color:#06210F;">Save Session</button>
+    </div>
+  `, {id:'finish', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('finish'));
+  $('#finishBack').addEventListener('click', ()=> closeModal('finish'));
+  $('#finishSave').addEventListener('click', (e)=>{
+    if(e.currentTarget.disabled) return;
+    e.currentTarget.disabled = true;
+    closeModal('finish'); completeSession();
+  });
+}
+function completeSession(){
+  const s = DB.activeSession;
+  s.durationMin = Math.max(1, Math.round((Date.now()-s.startedAt)/60000));
+  DB.sessions.push(s);
+  DB.activeSession = null;
+  save();
+  const newPRcount = sessionPRsAchieved(s).length; // same derivation the completion detail view uses -- one source of truth for "was this a PR"
+  toast(newPRcount>0? `Workout saved — ${newPRcount} new PR${newPRcount>1?'s':''}! 🎉` : 'Workout saved');
+  stopRestTimer();
+  stopElapsedTimer();
+  // V31: land on a real completion summary (duration/volume/sets/PRs,
+  // reusing the same detail view plain history uses) instead of a bare
+  // toast + Workout Home -- "justFinishedSessionId" only changes the
+  // header text ("X Complete") for this one visit, it's not stored.
+  wkNav('session-detail', {historyDate: s.id, justFinishedSessionId: s.id});
+}
+
+/* ---------------- History ---------------- */
+function renderWkHistory(root){
+  const sorted = [...DB.sessions].sort((a,b)=> b.startedAt-a.startedAt);
+  // V32: "did this workout include a PR" at a glance, without opening every
+  // session -- computed once for the whole list (see allSessionPRIds for
+  // why this is a single pass rather than N lookups).
+  const prIds = allSessionPRIds();
+  root.innerHTML = backHeader('History', ()=> wkNav('home'));
+  root.innerHTML += `<div class="card">${sorted.map(s=>`
+    <div class="list-row" data-sess="${s.id}" style="cursor:pointer;">
+      <div class="lr-main">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <div class="lr-title" style="flex:1;min-width:0;">${escapeHtml(s.routineName)}</div>
+          ${prIds.has(s.id)?'<span class="chip pr" style="flex:none;">PR</span>':''}
+        </div>
+        <div class="lr-sub">${dateLabel(s.date)} · ${s.durationMin||'-'} min · ${fmtInt(toDisplayWeight(sessionVolume(s)))} ${unitLabel()} vol</div>
+      </div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+    </div>`).join('') || '<div class="empty"><div class="e-title">No workouts yet</div><div class="e-sub">Your finished sessions will show up here.</div><button class="btn btn-sm btn-primary" id="emptyStartWorkout" style="margin-top:10px;">Start a Workout</button></div>'}
+  </div>`;
+  wireBack(()=> wkNav('home'));
+  $$('[data-sess]').forEach(el=> el.addEventListener('click', ()=> wkNav('session-detail', {historyDate:el.dataset.sess})));
+  const emptyStart = $('#emptyStartWorkout');
+  if(emptyStart) emptyStart.addEventListener('click', ()=> startSession(null));
+}
+
+function renderSessionDetail(root){
+  const s = DB.sessions.find(x=>x.id===wk.historyDate);
+  if(!s){ wkNav('history'); return; }
+  const justFinished = wk.justFinishedSessionId===s.id;
+  wk.justFinishedSessionId = null; // one-time -- reopening this same workout later is plain history, not a completion moment
+  const prog = sessionSetProgress(s);
+  const prs = sessionPRsAchieved(s);
+  const backTarget = ()=> wkNav(justFinished? 'home' : 'history');
+  root.innerHTML = backHeader(justFinished? (s.routineName+' Complete') : s.routineName, backTarget, `<button class="icon-btn" id="delSess" aria-label="Delete workout" style="width:34px;height:34px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg></button>`);
+  root.innerHTML += `
+    <div class="sub" style="margin-bottom:10px;">${dateLabel(s.date)} · ${s.durationMin} min${s.programId?` · ${escapeHtml(s.programName||'Program')}${s.programWeek?` · Week ${s.programWeek}`:''}${s.programPhase?` · ${escapeHtml(s.programPhase)}`:''}`:''}</div>
+    <div class="stat-grid" style="margin-bottom:12px;">
+      <div class="stat-box"><div class="sv" style="color:var(--blue);">${s.durationMin}</div><div class="sl">Minutes</div></div>
+      <div class="stat-box"><div class="sv" style="color:var(--ember);">${fmtInt(toDisplayWeight(sessionVolume(s)))}</div><div class="sl">${unitLabel()} volume</div></div>
+      <div class="stat-box"><div class="sv">${prog.done}/${prog.total}</div><div class="sl">Sets done</div></div>
+      <div class="stat-box"><div class="sv">${prs.length}</div><div class="sl">PR${prs.length===1?'':'s'}</div></div>
+    </div>
+    ${prs.length? `<div class="card">
+      <div class="card-title">Highlights</div>
+      ${prs.map(p=>`<div class="ex-suggest ex-suggest-up" style="margin:0 0 8px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SUGGEST_ICON_PATHS.up}</svg><span class="ll-lbl">PR</span><span class="ll-val">${escapeHtml(p.name)} — ${fmt1(toDisplayWeight(p.weight))} ${unitLabel()} × ${p.reps}${p.priorBest1RM>0?` (est. 1RM up from ${fmtInt(toDisplayWeight(p.priorBest1RM))} to ${fmtInt(toDisplayWeight(p.est1RM))} ${unitLabel()})`:''}</span></div>`).join('')}
+    </div>` : ''}
+    ${s.groups.map(g=>g.map(exEntry=>{
+      const e = exById(exEntry.exerciseId);
+      return `<div class="exercise-block"><div class="ex-head"><span class="ex-name">${escapeHtml(e?e.name:'?')}</span></div>
+      <table class="dtable"><tr><th>#</th><th>${exTypeCols(exEntry.exType).join('</th><th>')}</th><th>Tag</th></tr>
+      ${exEntry.sets.map((set,i)=>`<tr><td>${i+1}</td>${setDetailCols(exEntry.exType,set)}<td style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:10.5px;">${set.done?(set.tag||''):'—'}</td></tr>`).join('')}
+      </table></div>`;
+    }).join('')).join('')}
+    ${s.notes? `<div class="card"><div class="card-title">Notes</div><p style="font-size:13.5px;margin:0;">${escapeHtml(s.notes)}</p></div>`:''}
+    ${justFinished? `<button class="btn btn-primary btn-block" id="doneBtn" style="margin-top:4px;">Done</button>` : ''}
+  `;
+  wireBack(backTarget);
+  const doneBtn = $('#doneBtn');
+  if(doneBtn) doneBtn.addEventListener('click', ()=> wkNav('home'));
+  $('#delSess').addEventListener('click', ()=>{
+    openConfirmModal('This workout log will be permanently deleted, including its sets and PRs.', ()=>{
+      DB.sessions = DB.sessions.filter(x=>x.id!==s.id); save(); wkNav('history');
+    }, {title:'Delete Workout?', confirmLabel:'Delete', danger:true});
+  });
+}
+function exTypeCols(type){
+  const u = unitLabel();
+  return {weight_reps:[u,'Reps'], bodyweight:['Reps'], assisted:['Assist '+u,'Reps'], duration:['Sec'], cardio:['Dist','Sec','Kcal']}[type]||['Val'];
+}
+function setDetailCols(type,set){
+  if(type==='weight_reps') return `<td>${set.weight!=null?fmt1(toDisplayWeight(set.weight)):'-'}</td><td>${set.reps??'-'}</td>`;
+  if(type==='bodyweight') return `<td>${set.reps??'-'}</td>`;
+  if(type==='assisted') return `<td>${set.assistWeight!=null?fmt1(toDisplayWeight(set.assistWeight)):'-'}</td><td>${set.reps??'-'}</td>`;
+  if(type==='duration') return `<td>${set.durationSec??'-'}</td>`;
+  if(type==='cardio') return `<td>${set.distance??'-'}</td><td>${set.durationSec??'-'}</td><td>${set.calories??'-'}</td>`;
+  return '<td>-</td>';
+}
+
+/* ---------------- Stats ---------------- */
+function renderWkStats(root){
+  const loggedExIds = Array.from(new Set(DB.sessions.flatMap(s=> s.groups.flatMap(g=>g.map(e=>e.exerciseId)))));
+  if(!wk.statExId && loggedExIds.length) wk.statExId = loggedExIds[0];
+  root.innerHTML = backHeader('Stats & PRs', ()=> wkNav('home'));
+  if(loggedExIds.length===0){
+    root.innerHTML += `<div class="empty"><div class="e-title">No data yet</div><div class="e-sub">Finish a workout to start tracking PRs.</div><button class="btn btn-sm btn-primary" id="emptyStartWorkoutStats" style="margin-top:10px;">Start a Workout</button></div>`;
+    wireBack(()=> wkNav('home'));
+    $('#emptyStartWorkoutStats').addEventListener('click', ()=> startSession(null));
+    return;
+  }
+  const weekSessions = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO());
+  const weekSets = weekSessions.reduce((n,s)=> n + s.groups.reduce((m,g)=> m + g.reduce((k,e)=> k + (e.sets||[]).filter(isWorkingSet).length, 0), 0), 0);
+  const weekDurationMin = weekSessions.reduce((n,s)=> n + (s.durationMin||0), 0);
+  const monthCutoff = daysAgoISO(29);
+  const monthCount = DB.sessions.filter(s=> s.date>=monthCutoff).length;
+  const muscleGroups = muscleGroupSetCounts(THIS_WEEK_DAYS);
+  root.innerHTML += `
+    <div class="card">
+      <div class="card-title">Training Overview <span class="tick">This week</span></div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sv">${weekSessions.length}</div><div class="sl">Workouts</div></div>
+        <div class="stat-box"><div class="sv">${weekSets}</div><div class="sl">Working sets</div></div>
+        <div class="stat-box"><div class="sv">${fmtInt(toDisplayWeight(weekVolume()))}</div><div class="sl">${unitLabel()} volume</div></div>
+        <div class="stat-box"><div class="sv">${Math.floor(weekDurationMin/60)}h ${weekDurationMin%60}m</div><div class="sl">Duration</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Training Consistency</div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sv">${computeStreak()}</div><div class="sl">Current streak (days)</div></div>
+        <div class="stat-box"><div class="sv">${computeBestStreak()}</div><div class="sl">Best streak (days)</div></div>
+        <div class="stat-box"><div class="sv">${weekSessions.length}</div><div class="sl">This week</div></div>
+        <div class="stat-box"><div class="sv">${monthCount}</div><div class="sl">Last 30 days</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Muscle Groups <span class="tick">This week · working sets</span></div>
+      ${muscleGroups.length? muscleGroups.map(([cat,n])=>`
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+          <div style="width:78px;font-size:11.5px;color:var(--muted-2);font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.03em;">${escapeHtml(cat)}</div>
+          <div class="pbar blue" style="flex:1;"><div style="width:${clamp(n/Math.max(1,muscleGroups[0][1])*100,4,100)}%"></div></div>
+          <div class="mono" style="width:28px;text-align:right;font-size:12px;color:var(--paper);">${n}</div>
+        </div>`).join('') : `<div class="sub" style="padding:4px 0;">No working sets logged this week yet.</div>`}
+    </div>
+
+    <button class="btn btn-ghost btn-block" id="goProgressFromStats" style="margin-bottom:12px;">Body weight & measurements → Progress tab</button>
+
+    <div class="field"><label>Exercise</label>
+      <select class="input" id="statExSelect">${loggedExIds.map(id=>{const e=exById(id); return `<option value="${id}" ${id===wk.statExId?'selected':''}>${e?escapeHtml(e.name):'?'}</option>`;}).join('')}</select>
+    </div>
+    <div id="statBody"></div>
+  `;
+  wireBack(()=> wkNav('home'));
+  $('#goProgressFromStats').addEventListener('click', ()=> setTab('progress'));
+  $('#statExSelect').addEventListener('change', e=>{ wk.statExId=e.target.value; renderBody(); });
+  renderBody();
+  function renderBody(){
+    const ex = exById(wk.statExId);
+    const type = ex ? ex.type : 'weight_reps';
+    const prs = computePRs(wk.statExId);
+    const volPoints=[];
+    if(type==='weight_reps'){
+      DB.sessions.forEach(s=> s.groups.forEach(g=>g.forEach(exEntry=>{
+        if(exEntry.exerciseId!==wk.statExId) return;
+        let v=0; exEntry.sets.forEach(st=>{ if(isWorkingSet(st) && st.weight!=null && st.reps!=null) v+=st.weight*st.reps; });
+        if(v>0) volPoints.push({x:new Date(s.date).getTime(), y:toDisplayWeight(v)});
+      })));
+    }
+    $('#statBody').innerHTML = `
+      <div class="card">
+        <div class="card-title">Personal Records</div>
+        <div class="stat-grid">
+          ${prStatBoxesHtml(type, prs)}
+        </div>
+      </div>
+      ${type==='weight_reps'? `<div class="card"><div class="card-title">Volume Progression</div>${lineChartSVG([{label:'Volume', color:'#F59A4B', points:volPoints}])}</div>` : ''}
+      ${prChartHtml(type, prs)}
+    `;
+  }
+}
+
+/* ---------------- Calculators ---------------- */
+function renderCalculators(root){
+  root.innerHTML = backHeader('Calculators', ()=> wkNav('home'));
+  root.innerHTML += `
+    <div class="card">
+      <div class="card-title">Warm-Up Calculator</div>
+      <div class="row">
+        <div class="field"><label>Working Weight (${unitLabel()})</label><input class="input" id="wuWeight" type="number" placeholder="e.g. 225"></div>
+        <div class="field"><label>Working Reps</label><input class="input" id="wuReps" type="number" placeholder="e.g. 5"></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="wuGo">Calculate</button>
+      <div id="wuResult" style="margin-top:10px;"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Plate Calculator</div>
+      <div class="row">
+        <div class="field"><label>Target Weight (${unitLabel()})</label><input class="input" id="pcTarget" type="number" placeholder="e.g. 315"></div>
+        <div class="field"><label>Bar Weight (${unitLabel()})</label><input class="input" id="pcBar" type="number" value="${DB.settings.units==='kg'?20:45}"></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="pcGo">Calculate</button>
+      <div id="pcResult" style="margin-top:10px;"></div>
+    </div>
+  `;
+  wireBack(()=> wkNav('home'));
+  $('#wuGo').addEventListener('click', ()=>{
+    const w = parseFloat($('#wuWeight').value), r = parseFloat($('#wuReps').value)||5;
+    if(!Number.isFinite(w) || w<=0){ toast('Enter a valid working weight greater than 0'); return; }
+    const sets = warmupSets(w,r);
+    $('#wuResult').innerHTML = `<table class="dtable"><tr><th>Set</th><th>% of Working</th><th>Weight</th><th>Reps</th></tr>
+      ${sets.map((st,i)=>`<tr><td>${i+1}</td><td>${Math.round(st.pct*100)}%</td><td>${st.weight} ${unitLabel()}</td><td>${st.reps}</td></tr>`).join('')}
+      <tr><td>Work</td><td>100%</td><td>${w} ${unitLabel()}</td><td>${r}</td></tr>
+      </table>`;
+  });
+  $('#pcGo').addEventListener('click', ()=>{
+    const target = parseFloat($('#pcTarget').value), bar = parseFloat($('#pcBar').value)||(DB.settings.units==='kg'?20:45);
+    if(!Number.isFinite(target) || target<=0){ toast('Enter a valid target weight greater than 0'); return; }
+    const plates = DB.settings.units==='kg' ? [25,20,15,10,5,2.5,1.25] : [45,35,25,10,5,2.5];
+    const breakdown = plateBreakdown(target, bar, plates);
+    if(target<bar){ $('#pcResult').innerHTML = `<div class="empty"><div class="e-title">Target below bar weight</div></div>`; return; }
+    $('#pcResult').innerHTML = breakdown.length? `
+      <div class="sub" style="margin-bottom:8px;">Per side (bar: ${bar} ${unitLabel()}):</div>
+      <div class="row" style="flex-wrap:wrap;gap:8px;">${breakdown.map(b=>`<span class="chip" style="font-size:12px;padding:8px 12px;">${b.plate} × ${b.count}</span>`).join('')}</div>
+    ` : `<div class="sub">Just the bar — ${bar} ${unitLabel()}.</div>`;
+  });
+}
+
+/* =========================================================
+   NUTRITION MODULE
+   ========================================================= */
+let nut = { view:'diary', date: todayISO(), pickerMeal:null, plannerWeekStart:null };
+const MEAL_SLOTS = ['Breakfast','Lunch','Dinner','Snacks'];
+
+renderers.nutrition = function(){
+  const root = $('#screen-nutrition');
+  switch(nut.view){
+    case 'goals': return renderNutGoals(root);
+    case 'meals': return renderMealsList(root);
+    case 'meal-edit': return renderMealEdit(root);
+    case 'planner': return renderPlanner(root);
+    case 'activity': return renderActivityLog(root);
+    default: return renderDiary(root);
+  }
+};
+
+function nutNav(view, extra={}){ nut = {...nut, view, ...extra}; renderCurrent(); resetScreenScroll('nutrition'); }
+
+function renderDiary(root){
+  const date = nut.date;
+  const totals = computeDayTotals(date);
+  const goals = DB.settings.goals;
+  root.innerHTML = `
+    <div class="screen-head">
+      <h1>Nutrition</h1>
+      <div class="sub">${escapeHtml('E1FITNESS food & macro tracker')}</div>
+    </div>
+    ${weekDayStripHTML(date, iso=> dayFoodLogs(iso).length>0)}
+    <div class="row" style="align-items:center;margin-bottom:10px;">
+      <button class="icon-btn" id="prevDay" aria-label="Previous day">‹</button>
+      <div style="flex:2;text-align:center;font-family:'Oswald','Arial Narrow',Impact,sans-serif;text-transform:uppercase;letter-spacing:.04em;">${dateLabel(date)}</div>
+      <button class="icon-btn" id="nextDay" aria-label="Next day">›</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Daily Summary <span class="tick">Goal ${goals.calories}</span></div>
+      <div style="display:flex;align-items:center;gap:16px;">
+        ${gaugeBlock(clamp(totals.calories/goals.calories*100,0,100), fmtInt(totals.calories), 'kcal', `of ${fmtInt(goals.calories)}`, totals.calories>goals.calories?'var(--red)':'var(--ember)')}
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;">
+          ${dailySummaryMacroRow('Protein', totals.protein, goals.protein, 'var(--blue)')}
+          ${dailySummaryMacroRow('Carbs', totals.carbs, goals.carbs, 'var(--ember)')}
+          ${dailySummaryMacroRow('Fat', totals.fat, goals.fat, 'var(--green)')}
+        </div>
+      </div>
+      <div class="row" style="font-size:12.5px;color:var(--muted);margin-top:12px;padding-top:12px;border-top:1px solid var(--line);">
+        <div>Eaten: <span class="mono" style="color:var(--paper);">${fmtInt(totals.calories)}</span></div>
+        <div>Burned: <span class="mono" style="color:var(--paper);">${fmtInt(totals.burned)}</span></div>
+        <div>Left: <span class="mono" style="color:var(--paper);">${fmtInt(Math.max(0,goals.calories-totals.calories+totals.burned))}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Macros</div>
+      ${macroBar('Protein', totals.protein, goals.protein, 'blue')}
+      ${macroBar('Carbs', totals.carbs, goals.carbs, 'ember')}
+      ${macroBar('Fat', totals.fat, goals.fat, 'green')}
+      ${macroBar('Fiber', totals.fiber, goals.fiber, 'blue')}
+      ${macroBar('Sodium (mg)', totals.sodium, goals.sodium, 'red')}
+      ${DB.settings.netCarbMode? `<div style="font-size:12px;color:var(--muted);margin-top:4px;">Net carbs: <span class="mono" style="color:var(--paper);">${fmtInt(Math.max(0,totals.carbs-totals.fiber))}g</span></div>`:''}
+      <button class="btn btn-sm btn-ghost" id="editGoals" style="margin-top:8px;">Edit Goals</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Water <span class="tick">${waterCups(date)} / ${goals.water} cups</span></div>
+      <div class="pbar blue" style="margin-bottom:8px;"><div style="width:${clamp(waterCups(date)/goals.water*100,0,100)}%"></div></div>
+      <div class="row">${[1,-1].map(n=>`<button class="btn btn-ghost water-adj" data-n="${n}">${n>0?'+1 cup':'-1 cup'}</button>`).join('')}</div>
+    </div>
+    <div class="pill-row">
+      <button class="btn" id="goPlanner">Planner</button>
+      <button class="btn" id="goMeals">Saved Meals</button>
+      <button class="btn" id="goActivity">Activity</button>
+    </div>
+    ${dayFoodLogs(date).length===0 && dayFoodLogs(shiftDate(date,-1)).length>0 ? `<button class="btn btn-block" id="repeatYesterday" style="margin-bottom:12px;">Repeat Yesterday's Log</button>` : ''}
+    ${DB.meals.length ? `<div class="quicklog-row" role="group" aria-label="Quick-log a saved meal">
+      ${DB.meals.slice(0,6).map(m=>`<button class="range-chip quicklog-chip" data-quicklogmeal="${m.id}">${escapeHtml(m.name)}</button>`).join('')}
+    </div>` : ''}
+    <div id="mealSlots"></div>
+  `;
+  $('#prevDay').addEventListener('click', ()=>{ nut.date = shiftDate(date,-1); renderCurrent(); });
+  $('#nextDay').addEventListener('click', ()=>{ nut.date = shiftDate(date,1); renderCurrent(); });
+  $('#editGoals').addEventListener('click', ()=> nutNav('goals'));
+  $('#goMeals').addEventListener('click', ()=> nutNav('meals'));
+  $('#goPlanner').addEventListener('click', ()=> nutNav('planner'));
+  $('#goActivity').addEventListener('click', ()=> nutNav('activity'));
+  const repeatBtn = $('#repeatYesterday');
+  if(repeatBtn) repeatBtn.addEventListener('click', ()=>{
+    // Copies yesterday's entries as brand-new log rows for today — never
+    // mutates or references yesterday's records, so editing today's copy
+    // can't retroactively change what was actually logged yesterday.
+    const yesterday = dayFoodLogs(shiftDate(date,-1));
+    yesterday.forEach(l=> DB.foodLogs.push({id:uid(), date, meal:l.meal, foodId:l.foodId, amountType:l.amountType, amount:l.amount}));
+    save(); toast(`Repeated ${yesterday.length} item(s) from yesterday`); renderCurrent();
+  });
+  $$('.water-adj').forEach(b=> b.addEventListener('click', ()=>{
+    const n = parseInt(b.dataset.n);
+    DB.waterLogs[date] = Math.max(0,(DB.waterLogs[date]||0)+n);
+    save(); renderCurrent();
+  }));
+  $$('.day-pill').forEach(p=> p.addEventListener('click', ()=>{ nut.date = p.dataset.day; renderCurrent(); }));
+  $$('[data-quicklogmeal]').forEach(el=> el.addEventListener('click', ()=>{
+    const m = mealById(el.dataset.quicklogmeal);
+    if(!m) return;
+    openMealSlotChooser(slot=>{
+      const logDate = nut.date || todayISO();
+      m.items.forEach(it=> DB.foodLogs.push({id:uid(), date:logDate, meal:slot, foodId:it.foodId, amountType:'serving', amount:it.servings}));
+      save(); toast('Logged '+m.name+' to '+dateLabel(logDate)+"'s "+slot); renderCurrent();
+    });
+  }));
+  renderMealSlots();
+
+  function renderMealSlots(){
+    const wrap = $('#mealSlots');
+    wrap.innerHTML = MEAL_SLOTS.map(slot=>{
+      const logs = dayFoodLogs(date).filter(l=>l.meal===slot);
+      const slotCal = logs.reduce((sum,l)=> sum + logMacros(l).calories, 0);
+      return `<div class="card">
+        <div class="card-title">${slot} <span class="tick">${fmtInt(slotCal)} kcal</span></div>
+        ${logs.map(l=>{
+          const f = foodById(l.foodId);
+          if(!f) return '';
+          const m = logMacros(l);
+          return `<div class="list-row"><div class="lr-main" data-editlog="${l.id}" style="cursor:pointer;"><div class="lr-title">${escapeHtml(logLabel(l))}</div><div class="lr-sub">${fmtInt(m.calories)} kcal · P${fmtInt(m.protein)} C${fmtInt(m.carbs)} F${fmtInt(m.fat)}</div></div>
+          <button class="swipe-del" data-rmlog="${l.id}">Remove</button></div>`;
+        }).join('') || `<div class="sub" style="padding:4px 0 8px;">Nothing logged yet.</div>`}
+        <button class="btn btn-sm btn-ghost" data-addfood="${slot}">+ Add Food</button>
+      </div>`;
+    }).join('');
+    $$('[data-rmlog]').forEach(b=> b.addEventListener('click', ()=>{
+      DB.foodLogs = DB.foodLogs.filter(l=>l.id!==b.dataset.rmlog);
+      save(); renderMealSlots(); renderCurrent();
+    }));
+    $$('[data-editlog]').forEach(el=> el.addEventListener('click', ()=>{
+      const log = DB.foodLogs.find(l=>l.id===el.dataset.editlog);
+      const f = log && foodById(log.foodId);
+      if(f) openServingsPrompt(f, date, log.meal, log);
+    }));
+    $$('[data-addfood]').forEach(b=> b.addEventListener('click', ()=> openFoodPicker(date, b.dataset.addfood)));
+  }
+}
+function shiftDate(iso, days){ const d = new Date(iso+'T00:00:00'); d.setDate(d.getDate()+days); return localISODate(d); }
+function macroBar(label, val, goal, color){
+  const pct = clamp(val/goal*100,0,100);
+  return `<div class="macro-line"><div class="m-lbl">${label}</div><div class="pbar ${color}"><div style="width:${pct}%"></div></div><div class="m-val">${fmtInt(val)} / ${fmtInt(goal)}</div></div>`;
+}
+/* Compact label+number row (no bar) used beside the Daily Summary calorie
+   ring -- the full macro bars still live in the Macros card below, this is
+   just the at-a-glance number the mockup shows next to the ring. */
+function dailySummaryMacroRow(label, val, goal, dotColor){
+  return `<div style="display:flex;align-items:center;gap:7px;font-size:12.5px;">
+    <span style="width:7px;height:7px;border-radius:50%;flex:none;background:${dotColor};"></span>
+    <span style="color:var(--muted);flex:1;">${label}</span>
+    <span class="mono" style="color:var(--paper);">${fmtInt(val)}g<span style="color:var(--muted);">/${fmtInt(goal)}g</span></span>
+  </div>`;
+}
+
+/* ---------------- Food Picker Modal ---------------- */
+function openFoodPicker(date, meal){
+  let q='';
+  let mode='search'; // search | barcode | quick | custom
+  render();
+  function render(){
+    const html = `
+      <div class="modal-head"><h3>Add to ${escapeHtml(meal)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="seg" style="margin-bottom:12px;">
+        <button data-m="search" class="${mode==='search'?'active':''}">Search</button>
+        <button data-m="barcode" class="${mode==='barcode'?'active':''}">Barcode</button>
+        <button data-m="quick" class="${mode==='quick'?'active':''}">Quick Add</button>
+        <button data-m="custom" class="${mode==='custom'?'active':''}">New Food</button>
+      </div>
+      <div id="fpBody"></div>
+    `;
+    const existing = $('#backdrop-fp');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html,{id:'fp'});
+    $('#mClose').addEventListener('click', ()=> closeModal('fp'));
+    $$('[data-m]').forEach(b=> b.addEventListener('click', ()=>{ mode=b.dataset.m; render(); }));
+    const body = $('#fpBody');
+    if(mode==='search'){
+      body.innerHTML = `
+        <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="fpSearch" placeholder="Search ${DB.foods.length}+ foods" value="${escapeHtml(q)}"></div>
+        <div id="fpList"></div>
+      `;
+      renderFpList();
+      // FIX #3: only #fpList re-renders per keystroke — the search input is never
+      // replaced, so focus/cursor position survive every character typed.
+      $('#fpSearch').addEventListener('input', e=>{ q=e.target.value; renderFpList(); });
+    } else if(mode==='barcode'){
+      body.innerHTML = `
+        <div class="field"><label>Enter Barcode</label><input class="input" id="fpBarcode" placeholder="e.g. 012345678905"></div>
+        <button class="btn btn-primary btn-block" id="fpBarcodeGo">Find Food</button>
+        <div class="sub" style="margin-top:8px;">Matches foods you or the starter database have tagged with this barcode.</div>
+      `;
+      $('#fpBarcodeGo').addEventListener('click', ()=>{
+        const code = $('#fpBarcode').value.trim();
+        const f = DB.foods.find(x=>x.barcode===code);
+        if(f) openServingsPrompt(f, date, meal); else toast('No food found with that barcode — try "New Food" to add it.');
+      });
+    } else if(mode==='quick'){
+      body.innerHTML = `
+        <div class="field"><label>Type it naturally</label><input class="input" id="fpQuick" placeholder="e.g. 2 eggs, 200 cal chicken"></div>
+        <div class="sub" style="margin-bottom:10px;">A fast stand-in for voice logging — type what you ate and we'll match it to the database or log it as a quick calorie entry.</div>
+        <button class="btn btn-primary btn-block" id="fpQuickGo">Log It</button>
+      `;
+      $('#fpQuickGo').addEventListener('click', (e)=>{
+        if(e.currentTarget.disabled) return;
+        const text = $('#fpQuick').value.trim();
+        if(!text){ return; }
+        e.currentTarget.disabled = true;
+        quickAddParse(text, date, meal);
+        closeModal('fp');
+      });
+    } else if(mode==='custom'){
+      body.innerHTML = `
+        <div class="field"><label>Food Name</label><input class="input" id="cfName" placeholder="e.g. Mom's Lasagna"></div>
+        <div class="row">
+          <div class="field"><label>Serving Label</label><input class="input" id="cfServing" placeholder="e.g. 1 slice (150g)"></div>
+          <div class="field"><label>Serving Weight (g)</label><input class="input" id="cfServingGrams" type="number" placeholder="e.g. 150"></div>
+        </div>
+        <div class="sub" style="margin-bottom:8px;">Serving weight lets you log this food by gram amount later — leave blank if unknown.</div>
+        <div class="row">
+          <div class="field"><label>Calories</label><input class="input" id="cfCal" type="number"></div>
+          <div class="field"><label>Protein (g)</label><input class="input" id="cfP" type="number"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Carbs (g)</label><input class="input" id="cfC" type="number"></div>
+          <div class="field"><label>Fat (g)</label><input class="input" id="cfF" type="number"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Fiber (g)</label><input class="input" id="cfFib" type="number"></div>
+          <div class="field"><label>Sodium (mg)</label><input class="input" id="cfSod" type="number"></div>
+        </div>
+        <div class="field"><label>Barcode (optional)</label><input class="input" id="cfBarcode" placeholder="optional"></div>
+        <button class="btn btn-primary btn-block" id="cfSave">Save & Add</button>
+      `;
+      $('#cfSave').addEventListener('click', ()=>{
+        const name = $('#cfName').value.trim();
+        if(!name){ toast('Name it first'); return; }
+        const servingGrams = parseNonNegative($('#cfServingGrams').value);
+        const f = food(name, $('#cfServing').value.trim()||'1 serving', servingGrams,
+          parseNonNegative($('#cfCal').value), parseNonNegative($('#cfP').value), parseNonNegative($('#cfC').value), parseNonNegative($('#cfF').value),
+          parseNonNegative($('#cfFib').value), parseNonNegative($('#cfSod').value), $('#cfBarcode').value.trim());
+        f.custom = true;
+        DB.foods.push(f); save();
+        toast('Food added to your database');
+        openServingsPrompt(f, date, meal);
+      });
+    }
+
+    function foodRowHtml(f){
+      const logCount = foodLogCounts().get(f.id)||0;
+      return `<div class="list-row" data-food="${f.id}" style="cursor:pointer;">
+        <div class="icon-badge icon-badge-sm" style="background:rgba(245,154,75,0.14);color:var(--ember);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 2v3M10 2v3M14 2v3"/></svg></div>
+        <div class="lr-main"><div class="lr-title" style="display:flex;align-items:center;gap:6px;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>${f.barcode?'<span class="food-badge">Barcode</span>':''}${logCount>0?`<span class="sub" style="font-size:10.5px;">★ ${logCount} log${logCount!==1?'s':''}</span>`:''}</div><div class="lr-sub">${fmtInt(f.calories)} cal · ${fmtInt(f.protein)}g protein · ${fmtInt(f.fat)}g fat</div></div>
+        <button class="fav-star ${f.favorite?'on':''}" data-fav="${f.id}" title="${f.favorite?'Remove favorite':'Add favorite'}" aria-label="${f.favorite?'Remove favorite':'Add favorite'}">${f.favorite?'★':'☆'}</button>
+      </div>`;
+    }
+    function renderFpList(){
+      if(!q){
+        const favFoods = DB.foods.filter(f=> f.favorite);
+        const recentIds = recentFoodIds(8);
+        const freqIds = frequentFoodIds(8).filter(id=> !recentIds.includes(id));
+        const recentFoods = recentIds.map(foodById).filter(Boolean);
+        const freqFoods = freqIds.map(foodById).filter(Boolean);
+        const rest = DB.foods.slice(0,25);
+        let html = '';
+        if(favFoods.length) html += `<div class="card-title" style="margin:2px 0 4px;">Favorites</div>` + favFoods.map(foodRowHtml).join('');
+        if(recentFoods.length) html += `<div class="card-title" style="margin:14px 0 4px;">Recent</div>` + recentFoods.map(foodRowHtml).join('');
+        if(freqFoods.length) html += `<div class="card-title" style="margin:14px 0 4px;">Frequent</div>` + freqFoods.map(foodRowHtml).join('');
+        html += `<div class="card-title" style="margin:${(favFoods.length||recentFoods.length||freqFoods.length)?14:2}px 0 4px;">All Foods</div>` + rest.map(foodRowHtml).join('');
+        $('#fpList').innerHTML = html;
+      } else {
+        const filtered = rankFoodsForSearch(DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase())));
+        $('#fpList').innerHTML = filtered.map(foodRowHtml).join('') || '<div class="empty"><div class="e-title">No matches</div><div class="e-sub">Try "New Food" to add it.</div><button class="btn btn-sm btn-primary" id="fpEmptyNew" style="margin-top:10px;">+ New Food</button></div>';
+      }
+      $$('[data-food]').forEach(el=> el.addEventListener('click', ()=> openServingsPrompt(foodById(el.dataset.food), date, meal)));
+      $$('[data-fav]').forEach(el=> el.addEventListener('click', (ev)=>{
+        ev.stopPropagation();
+        toggleFoodFavorite(el.dataset.fav);
+        renderFpList();
+      }));
+      const emptyNew = $('#fpEmptyNew');
+      if(emptyNew) emptyNew.addEventListener('click', ()=>{ mode='custom'; render(); });
+    }
+  }
+}
+
+
+function openServingsPrompt(f, date, meal, existingLog){
+  closeModal('fp');
+  const isEdit = !!existingLog;
+  const hasGramBasis = f.servingGrams && f.servingGrams>0;
+  const prevLogRaw = !isEdit ? mostRecentLogForFood(f.id) : null;
+  // Ignore a previous "grams" log if this food no longer has a gram basis to convert against.
+  const prevLog = (prevLogRaw && logAmountType(prevLogRaw)==='grams' && !hasGramBasis) ? null : prevLogRaw;
+  let amountType = isEdit ? existingLog.amountType : (prevLog ? logAmountType(prevLog) : (hasGramBasis ? 'grams' : 'serving'));
+  let amountValue = isEdit ? existingLog.amount : (prevLog ? logAmountValue(prevLog) : (hasGramBasis ? f.servingGrams : 1));
+  render();
+
+  function render(){
+    const html = `
+      <div class="modal-head"><h3>${escapeHtml(f.name)}</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="sub" style="margin-bottom:10px;">Default serving: ${escapeHtml(f.servingLabel)} · ${fmtInt(f.calories)} kcal${prevLog? ' · prefilled from your last log' : ''}</div>
+      ${hasGramBasis ? `
+        <div class="field"><label>Log By</label>
+          <div class="seg">
+            <button data-at="grams" class="${amountType==='grams'?'active':''}">Grams</button>
+            <button data-at="serving" class="${amountType==='serving'?'active':''}">Servings</button>
+          </div>
+        </div>
+      ` : `<div class="sub" style="margin-bottom:8px;">No gram weight on file for this food, so it's logged by servings. You can add a serving weight by editing it as a custom food.</div>`}
+      ${amountType==='grams' ? `
+        <div class="field"><label>Amount (grams)</label><input class="input" id="servAmount" type="number" step="1" value="${fmt1(amountValue)}"></div>
+        <div class="row" style="margin-bottom:12px;">${[f.servingGrams, 50, 100, 150, 200].filter((v,i,arr)=>v && arr.indexOf(v)===i).slice(0,4).map(g=>`<button class="btn btn-sm btn-ghost" data-quickg="${g}">${fmtInt(g)} g</button>`).join('')}</div>
+      ` : `
+        <div class="field"><label>Servings <span style="color:var(--faint);">(1 = ${escapeHtml(f.servingLabel)})</span></label><input class="input" id="servAmount" type="number" step="0.25" value="${fmt1(amountValue)}"></div>
+        <div class="row" style="margin-bottom:12px;">${[0.5,1,1.5,2].map(n=>`<button class="btn btn-sm btn-ghost" data-quicks="${n}">${n}×</button>`).join('')}</div>
+      `}
+      <div class="card" id="servPreview" style="padding:12px;"></div>
+      <div class="field" style="margin-top:12px;"><label>Log to Meal</label>
+        <select class="input" id="servMeal">${MEAL_SLOTS.map(s=>`<option ${s===meal?'selected':''}>${s}</option>`).join('')}</select>
+      </div>
+      <button class="btn btn-primary btn-block" id="servSave">${isEdit? 'Save Changes' : 'Add to Diary'}</button>
+      ${isEdit? `<button class="btn btn-danger btn-block" id="servDelete" style="margin-top:8px;">Remove Entry</button>` : ''}
+    `;
+    const existing = $('#backdrop-serv');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html,{id:'serv'});
+    $('#mClose').addEventListener('click', ()=> closeModal('serv'));
+    $$('[data-at]').forEach(b=> b.addEventListener('click', ()=>{
+      amountType = b.dataset.at;
+      amountValue = amountType==='grams' ? (f.servingGrams||100) : 1;
+      render();
+    }));
+    $$('[data-quickg]').forEach(b=> b.addEventListener('click', ()=>{ amountValue=parseFloat(b.dataset.quickg); render(); }));
+    $$('[data-quicks]').forEach(b=> b.addEventListener('click', ()=>{ amountValue=parseFloat(b.dataset.quicks); render(); }));
+    const amtInput = $('#servAmount');
+    updatePreview();
+    amtInput.addEventListener('input', ()=>{
+      amountValue = parseFloat(amtInput.value)||0;
+      updatePreview();
+    });
+    $('#servSave').addEventListener('click', (e)=>{
+      // Guards against a fast double-tap creating two duplicate diary entries —
+      // the button's own DOM node can still receive a second synthetic click
+      // on some mobile browsers even after closeModal() detaches it.
+      if(e.currentTarget.disabled) return;
+      const val = parseFloat(amtInput.value)||0;
+      if(!isFinite(val) || val<=0){ toast('Enter a valid amount greater than 0'); return; }
+      e.currentTarget.disabled = true;
+      if(isEdit){
+        existingLog.amountType = amountType;
+        existingLog.amount = val;
+        existingLog.meal = $('#servMeal').value;
+        save(); closeModal('serv'); toast('Updated'); renderCurrent();
+      } else {
+        DB.foodLogs.push({id:uid(), date, meal:$('#servMeal').value, foodId:f.id, amountType, amount:val});
+        save(); closeModal('serv'); toast('Logged'); renderCurrent();
+      }
+    });
+    const delBtn = $('#servDelete');
+    if(delBtn) delBtn.addEventListener('click', ()=>{
+      DB.foodLogs = DB.foodLogs.filter(l=>l.id!==existingLog.id);
+      save(); closeModal('serv'); toast('Removed'); renderCurrent();
+    });
+  }
+  function updatePreview(){
+    const box = $('#servPreview');
+    if(!box) return;
+    const m = logMacros({foodId:f.id, amountType, amount:amountValue});
+    box.innerHTML = `<div class="stat-grid">
+      <div class="stat-box"><div class="sv">${fmtInt(m.calories)}</div><div class="sl">kcal</div></div>
+      <div class="stat-box"><div class="sv">${fmt1(m.protein)}g</div><div class="sl">Protein</div></div>
+      <div class="stat-box"><div class="sv">${fmt1(m.carbs)}g</div><div class="sl">Carbs</div></div>
+      <div class="stat-box"><div class="sv">${fmt1(m.fat)}g</div><div class="sl">Fat</div></div>
+    </div>`;
+  }
+}
+
+function quickAddParse(text, date, meal){
+  // An explicit calorie amount ("200 cal", "200kcal", "500 calories") always
+  // wins as a quick calorie-only entry, checked BEFORE any food-name match.
+  // Otherwise "200 cal chicken" would match "Chicken" in the database and log
+  // it using the food's own default serving/macros — silently discarding the
+  // number the user actually typed (and, worse, misreading the leading "200"
+  // as a serving-count multiplier instead of a calorie value).
+  const calMatch = text.match(/(\d+(\.\d+)?)\s*(kcal|cal|calories)\b/i);
+  if(calMatch){
+    const kcal = parseFloat(calMatch[1]);
+    if(!isFinite(kcal) || kcal<=0){ toast('Enter a valid calorie amount greater than 0'); return; }
+    // No macros are invented for a calorie-only entry — only calories are known.
+    // Tagged "(Quick Add)" so it stays visibly distinct from a real database food.
+    const quickFood = food(text.trim().slice(0,40)+' (Quick Add)', '1 entry', 0, kcal, 0,0,0,0,0);
+    quickFood.custom = true;
+    DB.foods.push(quickFood);
+    DB.foodLogs.push({id:uid(), date, meal, foodId:quickFood.id, amountType:'serving', amount:1});
+    save(); toast('Logged '+kcal+' kcal'); renderCurrent();
+    return;
+  }
+  const gramMatch = text.match(/(\d+(\.\d+)?)\s*g\b/i);
+  const numMatch = text.match(/^(\d+(\.\d+)?)\s+/);
+  // Many seeded foods are named "Egg, large" or "Chicken Breast, cooked" — the
+  // qualifier after the comma is never something a user actually types, so
+  // matching only against the part before it (e.g. "egg", "chicken breast")
+  // is what lets plain input like "2 eggs" or "200 g chicken breast" match at
+  // all. Ties go to the longest matching core name, so a specific match like
+  // "chicken breast" wins over a shorter, more collision-prone one.
+  const lowerText = text.toLowerCase();
+  let matchedFood = null, bestCoreLen = 0;
+  DB.foods.forEach(f=>{
+    const core = f.name.split(',')[0].trim().toLowerCase();
+    if(core.length>=3 && core.length>bestCoreLen && lowerText.includes(core)){ matchedFood = f; bestCoreLen = core.length; }
+  });
+  if(matchedFood){
+    // if the text specifies a gram amount and this food has a gram basis, log by grams;
+    // otherwise fall back to a serving-count multiplier (defaults to 1).
+    if(gramMatch && matchedFood.servingGrams>0){
+      const grams = parseFloat(gramMatch[1]);
+      DB.foodLogs.push({id:uid(), date, meal, foodId:matchedFood.id, amountType:'grams', amount:grams});
+      save(); toast('Logged '+fmt1(grams)+'g '+matchedFood.name); renderCurrent();
+      return;
+    }
+    const qty = numMatch? parseFloat(numMatch[1]) : 1;
+    DB.foodLogs.push({id:uid(), date, meal, foodId:matchedFood.id, amountType:'serving', amount:qty});
+    save(); toast('Logged '+matchedFood.name); renderCurrent();
+    return;
+  }
+  toast("Couldn't match a food — try New Food for full macros.");
+}
+
+/* ---------------- Goals ---------------- */
+function renderNutGoals(root){
+  const g = DB.settings.goals;
+  const plan = computeGoalPlan();
+  root.innerHTML = backHeader('Goals', ()=> nutNav('diary'));
+  root.innerHTML += `
+    <div class="card">
+      <div class="card-title">Smart Calorie Calculator</div>
+      ${plan ? `
+        <div class="sub" style="margin-bottom:10px;">
+          ${plan.direction==='maintain'
+            ? `Maintaining at ${fmt1(toDisplayWeight(plan.currentKg/0.45359237))} ${unitLabel()} → eat <b style="color:var(--paper);">~${fmtInt(plan.targetCalories)} kcal/day</b>`
+            : `To reach <b style="color:var(--paper);">${plan.goalKg!=null? fmt1(toDisplayWeight(plan.goalKg/0.45359237)) : '—'} ${unitLabel()}</b> from <b style="color:var(--paper);">${fmt1(toDisplayWeight(plan.currentKg/0.45359237))} ${unitLabel()}</b> at a <b style="color:var(--paper);">${plan.intensity}</b> pace → eat <b style="color:var(--paper);">~${fmtInt(plan.targetCalories)} kcal/day</b>`
+          }
+        </div>
+        <div class="stat-grid" style="margin-bottom:10px;">
+          <div class="stat-box"><div class="sv">${plan.bmr}</div><div class="sl">BMR (kcal/day)</div></div>
+          <div class="stat-box"><div class="sv">${plan.tdee}</div><div class="sl">Maintenance TDEE</div></div>
+          <div class="stat-box"><div class="sv">${fmtInt(plan.targetCalories)}</div><div class="sl">Suggested Calories</div></div>
+          <div class="stat-box"><div class="sv">${plan.proteinGrams} g</div><div class="sl">Suggested Protein</div></div>
+        </div>
+        ${plan.weeksToGoal!=null? `<div class="sub" style="margin-bottom:10px;">Estimated time to goal: <span class="mono" style="color:var(--paper);">~${plan.weeksToGoal} week${plan.weeksToGoal===1?'':'s'}</span></div>` : ''}
+        <button class="btn btn-primary btn-sm" id="applyTargets">Apply these targets</button>
+        <button class="btn btn-sm btn-ghost" id="editProfileGoal" style="margin-left:6px;">Edit Goal in Settings</button>
+      ` : `<div class="sub">Add your height, weight, age and sex in Settings → Profile to unlock the smart calorie calculator.</div>
+        <button class="btn btn-sm" id="goProfile" style="margin-top:8px;">Complete Profile in Settings</button>`}
+    </div>
+    <div class="card">
+      <div class="card-title">Daily Targets</div>
+      <div class="field"><label>Calories</label><input class="input" id="gCal" type="number" value="${g.calories}"></div>
+      <div class="row">
+        <div class="field"><label>Protein (g)</label><input class="input" id="gP" type="number" value="${g.protein}"></div>
+        <div class="field"><label>Carbs (g)</label><input class="input" id="gC" type="number" value="${g.carbs}"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Fat (g)</label><input class="input" id="gF" type="number" value="${g.fat}"></div>
+        <div class="field"><label>Fiber (g)</label><input class="input" id="gFib" type="number" value="${g.fiber}"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Sodium (mg)</label><input class="input" id="gSod" type="number" value="${g.sodium}"></div>
+        <div class="field"><label>Water (cups)</label><input class="input" id="gWater" type="number" value="${g.water}"></div>
+      </div>
+      <div class="field">
+        <label>Net Carbs / Keto Mode</label>
+        <div class="seg"><button data-v="off" class="${!DB.settings.netCarbMode?'active':''}">Off</button><button data-v="on" class="${DB.settings.netCarbMode?'active':''}">On</button></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="gSave">Save Goals</button>
+    </div>
+  `;
+  wireBack(()=> nutNav('diary'));
+  const applyBtn = $('#applyTargets');
+  if(applyBtn) applyBtn.addEventListener('click', ()=>{
+    $('#gCal').value = plan.targetCalories;
+    $('#gP').value = plan.proteinGrams;
+    toast('Calorie & protein targets filled in — tap Save Goals to confirm');
+  });
+  const editProfileGoal = $('#editProfileGoal');
+  if(editProfileGoal) editProfileGoal.addEventListener('click', openSettingsModal);
+  const goProfile = $('#goProfile');
+  if(goProfile) goProfile.addEventListener('click', openSettingsModal);
+  $$('[data-v]').forEach(b=> b.addEventListener('click', ()=>{
+    DB.settings.netCarbMode = b.dataset.v==='on';
+    $$('[data-v]').forEach(x=>x.classList.remove('active')); b.classList.add('active');
+  }));
+  $('#gSave').addEventListener('click', ()=>{
+    const candidate = {
+      calories: parsedOrKeep($('#gCal').value, g.calories),
+      protein: parsedOrKeep($('#gP').value, g.protein),
+      carbs: parsedOrKeep($('#gC').value, g.carbs),
+      fat: parsedOrKeep($('#gF').value, g.fat),
+      fiber: parsedOrKeep($('#gFib').value, g.fiber),
+      sodium: parsedOrKeep($('#gSod').value, g.sodium),
+      water: parsedOrKeep($('#gWater').value, g.water),
+    };
+    for(const key of Object.keys(candidate)){
+      const err = goalFieldError(key, candidate[key]);
+      if(err){ toast(err); return; }
+    }
+    Object.assign(g, candidate);
+    save(); toast('Goals updated'); nutNav('diary');
+  });
+}
+
+/* ---------------- Meals / Recipes ---------------- */
+function mealTotals(meal){
+  const t={calories:0,protein:0,carbs:0,fat:0};
+  meal.items.forEach(it=>{ const f=foodById(it.foodId); if(!f) return; t.calories+=f.calories*it.servings; t.protein+=f.protein*it.servings; t.carbs+=f.carbs*it.servings; t.fat+=f.fat*it.servings; });
+  return t;
+}
+function renderMealsList(root){
+  root.innerHTML = backHeader('Saved Meals', ()=> nutNav('diary'), `<button class="btn btn-sm btn-primary" id="newMeal">+ New</button>`);
+  root.innerHTML += `<div class="card">${DB.meals.map(m=>{
+    const t = mealTotals(m);
+    return `<div class="list-row"><div class="lr-main" data-editmeal="${m.id}" style="cursor:pointer;"><div class="lr-title">${escapeHtml(m.name)}</div><div class="lr-sub">${fmtInt(t.calories)} kcal · ${m.items.length} item${m.items.length!==1?'s':''}</div></div>
+      <button class="btn btn-sm" data-quicklog="${m.id}">Log</button></div>`;
+  }).join('') || '<div class="empty"><div class="e-title">No saved meals</div><div class="e-sub">Save combos you eat often for one-tap logging.</div><button class="btn btn-sm btn-primary" id="emptyNewMeal" style="margin-top:10px;">+ New Meal</button></div>'}</div>`;
+  wireBack(()=> nutNav('diary'));
+  $('#newMeal').addEventListener('click', ()=>{ nutNav('meal-edit', {editingMeal:{id:null,name:'',items:[]}}); });
+  const emptyNewMeal = $('#emptyNewMeal');
+  if(emptyNewMeal) emptyNewMeal.addEventListener('click', ()=>{ nutNav('meal-edit', {editingMeal:{id:null,name:'',items:[]}}); });
+  $$('[data-editmeal]').forEach(el=> el.addEventListener('click', ()=>{
+    const m = mealById(el.dataset.editmeal);
+    nutNav('meal-edit', {editingMeal: JSON.parse(JSON.stringify(m))});
+  }));
+  $$('[data-quicklog]').forEach(el=> el.addEventListener('click', ()=>{
+    const m = mealById(el.dataset.quicklog);
+    openMealSlotChooser(slot=>{
+      const logDate = nut.date || todayISO();
+      m.items.forEach(it=> DB.foodLogs.push({id:uid(), date:logDate, meal:slot, foodId:it.foodId, amountType:'serving', amount:it.servings}));
+      save(); toast('Logged '+m.name+' to '+dateLabel(logDate)+"'s "+slot);
+    });
+  }));
+}
+function renderMealEdit(root){
+  const m = nut.editingMeal;
+  root.innerHTML = backHeader(m.id?'Edit Meal':'New Meal', ()=> nutNav('meals'));
+  root.innerHTML += `
+    <div class="field"><label>Meal Name</label><input class="input" id="mName" value="${escapeHtml(m.name)}" placeholder="e.g. Post-Workout Shake"></div>
+    <div class="card-title">Items</div>
+    <div id="mItems"></div>
+    <button class="btn btn-block" id="mAddItem" style="margin-bottom:14px;">+ Add Food</button>
+    <div class="row"><button class="btn btn-ghost" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSave">Save Meal</button></div>
+    ${m.id?`<button class="btn btn-danger btn-block" id="mDelete" style="margin-top:10px;">Delete Meal</button>`:''}
+  `;
+  wireBack(()=> nutNav('meals'));
+  renderItems();
+  function renderItems(){
+    $('#mItems').innerHTML = m.items.map((it,i)=>{
+      const f = foodById(it.foodId);
+      return `<div class="list-row"><div class="lr-main"><div class="lr-title">${escapeHtml(f?f.name:'?')}</div><div class="lr-sub">${fmt1(it.servings)} × ${escapeHtml(f?f.servingLabel:'')}</div></div><button class="swipe-del" data-rm="${i}">✕</button></div>`;
+    }).join('') || '<div class="sub" style="padding:6px 0;">No items yet.</div>';
+    $$('[data-rm]').forEach(b=> b.addEventListener('click', ()=>{ m.items.splice(parseInt(b.dataset.rm),1); renderItems(); }));
+  }
+  $('#mAddItem').addEventListener('click', ()=>{
+    openFoodSearchOnly(f=>{
+      m.items.push({foodId:f.id, servings:1});
+      renderItems();
+    });
+  });
+  $('#mCancel').addEventListener('click', ()=> nutNav('meals'));
+  $('#mSave').addEventListener('click', ()=>{
+    m.name = $('#mName').value.trim() || 'Untitled Meal';
+    if(m.items.length===0){ toast('Add at least one food'); return; }
+    if(m.id){ const idx = DB.meals.findIndex(x=>x.id===m.id); DB.meals[idx]=m; }
+    else { m.id=uid(); DB.meals.push(m); }
+    save(); toast('Meal saved'); nutNav('meals');
+  });
+  const del = $('#mDelete');
+  if(del) del.addEventListener('click', ()=>{ DB.meals = DB.meals.filter(x=>x.id!==m.id); save(); nutNav('meals'); });
+}
+function openFoodSearchOnly(onPick){
+  let q='';
+  render();
+  function render(){
+    const filtered = rankFoodsForSearch(DB.foods.filter(f=> f.name.toLowerCase().includes(q.toLowerCase()))).slice(0,30);
+    const html = `<div class="modal-head"><h3>Add Food</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div class="search-bar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input class="input" id="fsSearch" placeholder="Search" value="${escapeHtml(q)}"></div>
+      <div>${filtered.map(f=>`<div class="list-row" data-pick="${f.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(f.name)}</div><div class="lr-sub">${fmtInt(f.calories)} kcal</div></div></div>`).join('')}</div>`;
+    const existing = $('#backdrop-fs');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html,{id:'fs'});
+    $('#mClose').addEventListener('click', ()=> closeModal('fs'));
+    $('#fsSearch').addEventListener('input', e=>{ q=e.target.value; render(); const i=$('#fsSearch'); i.focus(); i.selectionStart=i.selectionEnd=i.value.length; });
+    $$('[data-pick]').forEach(el=> el.addEventListener('click', ()=>{ closeModal('fs'); onPick(foodById(el.dataset.pick)); }));
+  }
+}
+
+/* ---------------- Meal Planner ---------------- */
+function weekStartISO(iso){ const d=new Date(iso+'T00:00:00'); const day=d.getDay(); d.setDate(d.getDate()-day); return localISODate(d); }
+function renderPlanner(root){
+  if(!nut.plannerWeekStart) nut.plannerWeekStart = weekStartISO(todayISO());
+  const start = nut.plannerWeekStart;
+  const days = Array.from({length:7}, (_,i)=> shiftDate(start,i));
+  root.innerHTML = backHeader('Meal Planner', ()=> nutNav('diary'));
+  root.innerHTML += `
+    <div class="row" style="align-items:center;margin-bottom:8px;">
+      <button class="icon-btn" id="pPrev" aria-label="Previous month">‹</button>
+      <div style="flex:2;text-align:center;font-size:12.5px;color:var(--muted);">Week of ${dateLabel(start)}</div>
+      <button class="icon-btn" id="pNext" aria-label="Next month">›</button>
+    </div>
+    ${days.map(d=>{
+      const planned = DB.mealPlan[d]||{};
+      return `<div class="card">
+        <div class="card-title">${new Date(d+'T00:00:00').toLocaleDateString(undefined,{weekday:'long', month:'short', day:'numeric'})}</div>
+        ${MEAL_SLOTS.map(slot=>{
+          const mealId = planned[slot];
+          const meal = mealId? mealById(mealId) : null;
+          return `<div class="list-row"><div class="lr-main"><div class="lr-title">${slot}</div><div class="lr-sub">${meal?escapeHtml(meal.name):'Not planned'}</div></div>
+            <div style="display:flex;gap:6px;flex:none;">
+              <button class="btn btn-sm btn-ghost" data-plan="${d}|${slot}">${meal?'Change':'Plan'}</button>
+              ${meal? `<button class="btn btn-sm btn-ghost" data-unplan="${d}|${slot}" title="Remove plan">✕</button>` : ''}
+            </div></div>`;
+        }).join('')}
+      </div>`;
+    }).join('')}
+  `;
+  wireBack(()=> nutNav('diary'));
+  $('#pPrev').addEventListener('click', ()=>{ nut.plannerWeekStart = shiftDate(start,-7); renderCurrent(); });
+  $('#pNext').addEventListener('click', ()=>{ nut.plannerWeekStart = shiftDate(start,7); renderCurrent(); });
+  $$('[data-plan]').forEach(b=> b.addEventListener('click', ()=>{
+    const [d,slot] = b.dataset.plan.split('|');
+    if(DB.meals.length===0){ toast('Save a meal first, then plan it here'); return; }
+    openMealChooser(chosen=>{
+      if(!DB.mealPlan[d]) DB.mealPlan[d]={};
+      DB.mealPlan[d][slot]=chosen.id;
+      save(); renderCurrent();
+    });
+  }));
+  $$('[data-unplan]').forEach(b=> b.addEventListener('click', ()=>{
+    const [d,slot] = b.dataset.unplan.split('|');
+    if(DB.mealPlan[d]) delete DB.mealPlan[d][slot];
+    save(); renderCurrent();
+  }));
+}
+// One-tap meal-slot picker — used wherever a saved meal or repeat action
+// needs to know which of today's meal slots to log into, since that context
+// isn't implied on screens like Saved Meals that aren't scoped to one slot.
+function openMealSlotChooser(onPick){
+  const html = `<div class="modal-head"><h3>Log To</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div>${MEAL_SLOTS.map(s=>`<div class="list-row" data-slot="${s}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${s}</div></div></div>`).join('')}</div>`;
+  openModal(html, {id:'msc', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('msc'));
+  $$('[data-slot]').forEach(el=> el.addEventListener('click', ()=>{ closeModal('msc'); onPick(el.dataset.slot); }));
+}
+function openMealChooser(onPick){
+  const html = `<div class="modal-head"><h3>Choose Meal</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div>${DB.meals.map(m=>`<div class="list-row" data-pick="${m.id}" style="cursor:pointer;"><div class="lr-main"><div class="lr-title">${escapeHtml(m.name)}</div></div></div>`).join('')}</div>`;
+  openModal(html, {id:'mc'});
+  $('#mClose').addEventListener('click', ()=> closeModal('mc'));
+  $$('[data-pick]').forEach(el=> el.addEventListener('click', ()=>{ closeModal('mc'); onPick(mealById(el.dataset.pick)); }));
+}
+
+/* ---------------- Activity Log ---------------- */
+function renderActivityLog(root){
+  const date = nut.date || todayISO();
+  const todays = DB.activityLogs.filter(a=>a.date===date);
+  root.innerHTML = backHeader('Activity & Steps', ()=> nutNav('diary'));
+  root.innerHTML += `
+    <div class="sub" style="margin-bottom:10px;">Logging for ${escapeHtml(dateLabel(date))}</div>
+    <div class="card">
+      <div class="card-title">Log Activity</div>
+      <div class="field"><label>Type</label><input class="input" id="actLabel" placeholder="e.g. Walking, Steps, Basketball"></div>
+      <div class="row">
+        <div class="field"><label>Minutes</label><input class="input" id="actMin" type="number"></div>
+        <div class="field"><label>Calories burned</label><input class="input" id="actCal" type="number"></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="actSave">Add Activity</button>
+    </div>
+    <div class="card">
+      <div class="card-title">${escapeHtml(dateLabel(date))}'s Activity</div>
+      ${todays.map(a=>`<div class="list-row"><div class="lr-main"><div class="lr-title">${escapeHtml(a.label)}</div><div class="lr-sub">${a.minutes} min · ${a.calories} kcal</div></div><button class="swipe-del" data-rmact="${a.id}">Remove</button></div>`).join('') || '<div class="empty"><div class="e-title">Nothing logged yet</div><div class="e-sub">Add a walk, run, or any activity above.</div></div>'}
+    </div>
+  `;
+  wireBack(()=> nutNav('diary'));
+  $('#actSave').addEventListener('click', ()=>{
+    const label = $('#actLabel').value.trim() || 'Activity';
+    const minutes = parseNonNegative($('#actMin').value);
+    const calories = parseNonNegative($('#actCal').value);
+    DB.activityLogs.push({id:uid(), date, type:'manual', label, minutes, calories});
+    save(); toast('Activity logged'); renderCurrent();
+  });
+  $$('[data-rmact]').forEach(b=> b.addEventListener('click', ()=>{
+    DB.activityLogs = DB.activityLogs.filter(a=>a.id!==b.dataset.rmact);
+    save(); renderCurrent();
+  }));
+}
+
+/* =========================================================
+   PROGRESS MODULE
+   ========================================================= */
+// Ephemeral UI state for the Progress screen — not persisted, resets on
+// reload like any other in-memory view state (e.g. which tab is active).
+// Never touches DB.measurements itself.
+const PROGRESS_RANGES = [
+  {key:'7D', days:7}, {key:'30D', days:30}, {key:'3M', days:90},
+  {key:'6M', days:182}, {key:'1Y', days:365}, {key:'All', days:null}
+];
+const PROGRESS_HISTORY_PAGE = 20;
+let progressChartRange = 'All'; // 'All' keeps the pre-V25 all-time chart behavior as the default
+let progressHistoryExpanded = false;
+// V29: a fixed, repeating color per muscle-group row (bar + dot), purely
+// decorative categorization -- never the only signal for anything (the
+// category name label is always shown alongside it).
+const MUSCLE_DOT_COLORS = ['var(--blue)','var(--green)','var(--ember)','#B073F0','#F06AA6'];
+
+renderers.progress = function(){
+  const root = $('#screen-progress');
+  const sorted = [...DB.measurements].sort((a,b)=> new Date(a.date)-new Date(b.date));
+  const range = PROGRESS_RANGES.find(r=>r.key===progressChartRange) || PROGRESS_RANGES[PROGRESS_RANGES.length-1];
+  const cutoff = range.days!=null ? Date.now() - range.days*86400000 : null;
+  const chartMeasurements = cutoff!=null ? sorted.filter(m=> new Date(m.date).getTime() >= cutoff) : sorted;
+  const weightPoints = chartMeasurements.filter(m=>m.weight!=null).map(m=>({x:new Date(m.date).getTime(), y:toDisplayWeight(m.weight)}));
+  const latest = sorted[sorted.length-1]; // stat boxes always reflect the true latest entry, independent of the chart's range filter
+  const weight = weightSummary();
+  const goalLine = weight.goalLbs!=null ? {y: toDisplayWeight(weight.goalLbs), label:'Goal '+fmt1(toDisplayWeight(weight.goalLbs))+' '+unitLabel(), color:'var(--green)'} : null;
+
+  const historyAll = [...sorted].reverse();
+  const historyRows = progressHistoryExpanded ? historyAll : historyAll.slice(0, PROGRESS_HISTORY_PAGE);
+  const weightChange = weightChangeSummary(range.days || 36500);
+  const strength = topStrengthHighlights(3);
+  const streak = computeStreak();
+  const bestStreak = computeBestStreak();
+  const weekCount = DB.sessions.filter(s=> s.date>=thisWeekCutoffISO()).length;
+  const monthCount = DB.sessions.filter(s=> s.date>=daysAgoISO(29)).length;
+  // Muscle-group trend rides the same range chip as the Weight Trend chart
+  // above -- no extra filter control. "All" has no fixed-length window to
+  // compare against a prior period of equal length, so it falls back to a
+  // 30-day snapshot with no delta rather than a meaningless comparison.
+  const trendDays = range.days || 30;
+  const muscleNow = muscleGroupSetCounts(trendDays);
+  const muscleBefore = range.days ? muscleGroupSetCounts(trendDays, trendDays) : null;
+
+  root.innerHTML = `
+    <div class="screen-head"><h1>Progress</h1><div class="sub">Body measurements & weight</div></div>
+    <div class="card">
+      <div class="card-title">Weight Trend${weightChange && weightChange.deltaLbs!==0 ? (()=>{
+          const pct = weightChange.baseWeightLbs ? Math.round(Math.abs(weightChange.deltaLbs)/weightChange.baseWeightLbs*100) : null;
+          const isLoss = weightChange.deltaLbs<0;
+          // Green only when the change actually moves toward the user's own
+          // stated goal direction (lose vs gain) -- a smaller number isn't
+          // automatically "good" for someone whose goal is to gain.
+          const towardGoal = (weight.direction==='lose' && isLoss) || (weight.direction==='gain' && !isLoss);
+          return ` <span class="pct-badge ${towardGoal?'up':'down'}">${isLoss?'-':'+'}${pct!=null?pct+'%':fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))+' '+unitLabel()}</span>`;
+        })() : ''}</div>
+      <div class="range-row" role="group" aria-label="Chart time range">
+        ${PROGRESS_RANGES.map(r=>`<button class="range-chip ${r.key===progressChartRange?'active':''}" data-range="${r.key}" aria-pressed="${r.key===progressChartRange}">${r.key}</button>`).join('')}
+      </div>
+      ${lineChartSVG([{label:'Weight ('+unitLabel()+')', color:'var(--blue)', points:weightPoints}], {autoRange:true, refLine:goalLine, emptyTitle:'No weight history yet', emptySub:'Log your first measurement to start tracking your trend.'})}
+      ${weightChange ? `<div class="sub" style="margin-top:8px;">${weightChange.deltaLbs===0?'No change':`${weightChange.deltaLbs>0?'Up':'Down'} ${fmt1(Math.abs(toDisplayWeight(weightChange.deltaLbs)))} ${unitLabel()}`} over the selected range (${weightChange.spanDays} day${weightChange.spanDays===1?'':'s'})</div>` : ''}
+      ${weight.remaining!=null ? `<div class="sub" style="margin-top:4px;">${weight.direction==='there'? "You're at your goal weight!" : `${fmt1(weight.remaining)} ${unitLabel()} to ${weight.direction==='lose'?'go (losing)':'go (gaining)'}`}</div>` : ''}
+    </div>
+    <div class="stat-grid" style="margin-bottom:12px;">
+      <div class="stat-box"><div class="sv">${latest && latest.weight!=null? fmt1(toDisplayWeight(latest.weight)):'—'}</div><div class="sl">Latest Weight (${unitLabel()})</div></div>
+      <div class="stat-box"><div class="sv">${latest && latest.bodyFat!=null? latest.bodyFat+'%':'—'}</div><div class="sl">Body Fat</div></div>
+    </div>
+    <button class="btn btn-primary btn-block" id="addMeasurement" style="margin-bottom:12px;">+ Log Measurements</button>
+
+    <div class="card">
+      <div class="card-title">Strength <span class="tick">Est. 1RM</span></div>
+      ${strength.length ? strength.map(s=>`<div class="strength-row"><span class="strength-name">${escapeHtml(s.name)}</span><span class="strength-val mono">${fmt1(toDisplayWeight(s.best1RM))} ${unitLabel()}</span></div>`).join('')
+        : `<div class="sub" style="padding:4px 0;">No strength history yet. Finish a weighted workout to see your best lifts here.</div>`}
+      <button class="btn btn-ghost btn-block" id="goStatsFromProgress" style="margin-top:10px;">Full Stats & PRs</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Muscle Groups <span class="tick">${range.days? range.key : '30D'}${muscleBefore?' vs prior':''}</span></div>
+      ${muscleNow.length ? (()=>{
+        const priorMap = new Map(muscleBefore||[]);
+        const maxVal = muscleNow[0][1];
+        return muscleNow.map(([cat,n],i)=>{
+          const prior = muscleBefore ? (priorMap.get(cat)||0) : null;
+          const delta = prior!=null ? n-prior : null;
+          // % change when there's a real prior baseline to divide by; a raw
+          // set-count delta (matching the row's own units) when the muscle
+          // group had zero sets last period, since "+400%" from a base of 0
+          // working sets isn't a real percentage.
+          const deltaLabel = delta==null || delta===0 ? null
+            : (prior>0 ? `${delta>0?'+':''}${Math.round(delta/prior*100)}%` : `${delta>0?'+':''}${delta}`);
+          return `<div class="mg-row">
+            <span class="mg-dot" style="background:${MUSCLE_DOT_COLORS[i%MUSCLE_DOT_COLORS.length]};"></span>
+            <div class="mg-cat">${escapeHtml(cat)}</div>
+            <div class="pbar blue" style="flex:1;"><div style="width:${clamp(n/Math.max(1,maxVal)*100,4,100)}%;background:${MUSCLE_DOT_COLORS[i%MUSCLE_DOT_COLORS.length]};"></div></div>
+            <div class="mg-val mono">${n} sets</div>
+            ${deltaLabel ? `<span class="pct-badge ${delta>0?'up':'down'}">${deltaLabel}</span>` : ''}
+          </div>`;
+        }).join('');
+      })() : `<div class="sub" style="padding:4px 0;">No working sets logged in this range yet.</div>`}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Consistency</div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sv">${streak}</div><div class="sl">Current streak</div></div>
+        <div class="stat-box"><div class="sv">${bestStreak}</div><div class="sl">Best streak</div></div>
+        <div class="stat-box"><div class="sv">${weekCount}</div><div class="sl">This week</div></div>
+        <div class="stat-box"><div class="sv">${monthCount}</div><div class="sl">Last 30 days</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">History</div>
+      <table class="dtable"><tr><th>Date</th><th>Wt</th><th>BF%</th><th>Waist</th><th></th></tr>
+      ${historyRows.map(m=>{
+        const hasExtra = m.chest!=null || m.hips!=null || m.arm!=null || m.thigh!=null;
+        const label = dateLabel(m.date);
+        const mainRow = `<tr class="ms-row"><td>${escapeHtml(label)}</td><td>${m.weight!=null?fmt1(toDisplayWeight(m.weight)):'-'}</td><td>${m.bodyFat??'-'}</td><td>${m.waist??'-'}</td><td>${hasExtra?`<button class="icon-btn ms-expand" data-msexpand="${m.id}" aria-label="Show more measurements for ${escapeHtml(label)}" aria-expanded="false"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg></button>`:''}</td></tr>`;
+        const detailRow = hasExtra ? `<tr class="ms-detail" id="msdetail-${m.id}" style="display:none;"><td colspan="5"><div class="ms-detail-grid">
+              <div><span class="ms-detail-lbl">Chest</span><span class="ms-detail-val">${m.chest??'-'}</span></div>
+              <div><span class="ms-detail-lbl">Hips</span><span class="ms-detail-val">${m.hips??'-'}</span></div>
+              <div><span class="ms-detail-lbl">Arm</span><span class="ms-detail-val">${m.arm??'-'}</span></div>
+              <div><span class="ms-detail-lbl">Thigh</span><span class="ms-detail-val">${m.thigh??'-'}</span></div>
+          </div></td></tr>` : '';
+        return mainRow + detailRow;
+      }).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--muted);font-family:'Figtree',sans-serif;padding:10px 4px;">No measurements yet — log your first one above to start tracking.</td></tr>`}
+      </table>
+      ${!progressHistoryExpanded && historyAll.length>PROGRESS_HISTORY_PAGE ? `<button class="btn btn-ghost btn-block" id="msShowAll" style="margin-top:10px;">Show all ${historyAll.length} entries</button>` : ''}
+    </div>
+  `;
+  $('#addMeasurement').addEventListener('click', openMeasurementModal);
+  const goStatsBtn = $('#goStatsFromProgress');
+  if(goStatsBtn) goStatsBtn.addEventListener('click', ()=>{ setTab('workout'); wkNav('stats'); });
+  $$('.range-row [data-range]').forEach(btn=> btn.addEventListener('click', ()=>{
+    progressChartRange = btn.dataset.range; renderers.progress();
+  }));
+  $$('.ms-expand').forEach(btn=> btn.addEventListener('click', ()=>{
+    const row = $('#msdetail-'+btn.dataset.msexpand);
+    if(!row) return;
+    const expanded = row.style.display !== 'none';
+    row.style.display = expanded ? 'none' : '';
+    btn.setAttribute('aria-expanded', String(!expanded));
+  }));
+  const showAllBtn = $('#msShowAll');
+  if(showAllBtn) showAllBtn.addEventListener('click', ()=>{ progressHistoryExpanded = true; renderers.progress(); });
+};
+
+/* FEATURE 2: shared weight-logging helpers. Logging weight from either the quick
+   dashboard button or the full measurement form updates the same day's entry
+   (no duplicate rows per day) and keeps Settings → Profile weight in sync so
+   the calorie calculator always reflects the latest logged weight. */
+function findOrCreateMeasurementForDate(date){
+  let m = DB.measurements.find(x=>x.date===date);
+  if(!m){ m = {id:uid(), date, weight:null, bodyFat:null, waist:null, chest:null, hips:null, arm:null, thigh:null}; DB.measurements.push(m); }
+  return m;
+}
+// Validates a raw weight-input string: must be non-blank and parse to a
+// finite, strictly-positive number. Used everywhere a weight value can sync
+// into DB.settings.profile.weightLbs, since a bad value there quietly
+// corrupts the BMR/TDEE calculator and the Progress weight trend.
+// Parses a raw numeric-field string to a finite, non-negative number, or
+// `fallback` (default 0) for blank/invalid/negative/Infinity input — for
+// fields like custom-food macros or activity minutes/calories where a
+// value can legitimately be zero but never negative or non-finite.
+function parseNonNegative(raw, fallback=0){
+  if(raw==null) return fallback;
+  const trimmed = String(raw).trim();
+  if(trimmed==='') return fallback;
+  const n = parseFloat(trimmed);
+  return (Number.isFinite(n) && n>=0) ? n : fallback;
+}
+function parsePositiveWeight(raw){
+  if(raw==null) return null;
+  const trimmed = String(raw).trim();
+  if(trimmed==='') return null;
+  const n = parseFloat(trimmed);
+  if(!Number.isFinite(n) || n<=0) return null;
+  return n;
+}
+function logWeightEntry(displayWeight, date=todayISO()){
+  const lbs = fromDisplayWeight(displayWeight);
+  const m = findOrCreateMeasurementForDate(date);
+  m.weight = lbs;
+  DB.settings.profile.weightLbs = lbs;
+  save();
+}
+function openQuickWeightModal(){
+  const latest = [...DB.measurements].filter(m=>m.weight!=null).sort((a,b)=> new Date(a.date)-new Date(b.date)).pop();
+  openModal(`
+    <div class="modal-head"><h3>Log Today's Weight</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="qwWeight" type="number" step="0.1" value="${latest? fmt1(toDisplayWeight(latest.weight)) : ''}" autofocus></div>
+    <button class="btn btn-primary btn-block" id="qwSave">Save</button>
+  `,{id:'qw', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('qw'));
+  $('#qwSave').addEventListener('click', ()=>{
+    const w = parsePositiveWeight($('#qwWeight').value);
+    if(w==null){ toast('Enter a valid weight greater than 0'); return; }
+    logWeightEntry(w);
+    closeModal('qw'); toast('Weight logged'); rerender();
+  });
+}
+function openMeasurementModal(){
+  openModal(`
+    <div class="modal-head"><h3>Log Measurements</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="msWeight" type="number" step="0.1"></div>
+    <div class="row">
+      <div class="field"><label>Body Fat %</label><input class="input" id="msBF" type="number" step="0.1"></div>
+      <div class="field"><label>Waist</label><input class="input" id="msWaist" type="number" step="0.1"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Chest</label><input class="input" id="msChest" type="number" step="0.1"></div>
+      <div class="field"><label>Hips</label><input class="input" id="msHips" type="number" step="0.1"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Arm</label><input class="input" id="msArm" type="number" step="0.1"></div>
+      <div class="field"><label>Thigh</label><input class="input" id="msThigh" type="number" step="0.1"></div>
+    </div>
+    <button class="btn btn-primary btn-block" id="msSave">Save Entry</button>
+  `,{id:'ms'});
+  $('#mClose').addEventListener('click', ()=> closeModal('ms'));
+  $('#msSave').addEventListener('click', ()=>{
+    const rawWeight = $('#msWeight').value;
+    const weightBlank = rawWeight==null || String(rawWeight).trim()==='';
+    const w = weightBlank ? null : parsePositiveWeight(rawWeight);
+    if(!weightBlank && w==null){ toast('Enter a valid weight greater than 0, or leave it blank'); return; }
+    const m = findOrCreateMeasurementForDate(todayISO());
+    if(w!=null){ m.weight = fromDisplayWeight(w); DB.settings.profile.weightLbs = m.weight; }
+    m.bodyFat = parsedOrKeep($('#msBF').value, m.bodyFat??null);
+    m.waist = parsedOrKeep($('#msWaist').value, m.waist??null);
+    m.chest = parsedOrKeep($('#msChest').value, m.chest??null);
+    m.hips = parsedOrKeep($('#msHips').value, m.hips??null);
+    m.arm = parsedOrKeep($('#msArm').value, m.arm??null);
+    m.thigh = parsedOrKeep($('#msThigh').value, m.thigh??null);
+    save(); closeModal('ms'); toast('Measurement saved'); renderCurrent();
+  });
+}
+
+/* =========================================================
+   SETTINGS
+   ========================================================= */
+/* V26 Goals & Accountability view -- a read-only summary of goals the user
+   already has (weight goal, nutrition/water goals from Settings) plus
+   real consistency stats. Deliberately reuses existing fields/helpers only
+   (weightSummary, computeDayTotals, DB.settings.goals, computeStreak) --
+   no new schema, no separate goal-tracking system. Editing still happens
+   in Settings; this is just "where do I stand," one tap away. */
+function openGoalsModal(){
+  const s = DB.settings;
+  const totals = computeDayTotals(todayISO());
+  const weight = weightSummary();
+  const streak = computeStreak();
+  const weekCount = DB.sessions.filter(x=> x.date>=thisWeekCutoffISO()).length;
+  const goalRow = (label, cur, target, unit, color)=>{
+    if(target==null || !target) return '';
+    const pct = clamp((cur/target)*100, 0, 100);
+    return `<div class="goal-row">
+      <div class="goal-row-top"><span>${escapeHtml(label)}</span><span class="mono">${fmtInt(cur)} / ${fmtInt(target)}${unit}</span></div>
+      <div class="pbar ${color}"><div style="width:${pct}%"></div></div>
+    </div>`;
+  };
+  openModal(`
+    <div class="modal-head"><h3>Goals</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+    <div class="card-title">Body</div>
+    ${weight.goalLbs!=null ? `<div class="goal-row">
+        <div class="goal-row-top"><span>Weight</span><span class="mono">${weight.currentLbs!=null?fmt1(toDisplayWeight(weight.currentLbs)):'—'} / ${fmt1(toDisplayWeight(weight.goalLbs))} ${unitLabel()}</span></div>
+        ${weight.remaining!=null? `<div class="sub" style="margin-top:2px;">${weight.direction==='there'?"You're at your goal weight!":`${fmt1(weight.remaining)} ${unitLabel()} to go`}</div>` : ''}
+      </div>`
+      : `<div class="sub" style="padding:4px 0 10px;">No goal weight set yet.</div>`}
+    <hr class="hairline">
+    <div class="card-title">Nutrition <span class="tick">Today</span></div>
+    ${goalRow('Calories', totals.calories, s.goals.calories, ' kcal', 'ember') || `<div class="sub" style="padding:4px 0;">No calorie goal set.</div>`}
+    ${goalRow('Protein', totals.protein, s.goals.protein, 'g', 'blue')}
+    ${goalRow('Water', waterCups(todayISO()), s.goals.water, ' cups', 'blue')}
+    <hr class="hairline">
+    <div class="card-title">Consistency</div>
+    <div class="stat-grid">
+      <div class="stat-box"><div class="sv">${streak}</div><div class="sl">Current streak (days)</div></div>
+      <div class="stat-box"><div class="sv">${weekCount}</div><div class="sl">Workouts this week</div></div>
+    </div>
+    <button class="btn btn-block" id="goalsEditPrefs" style="margin-top:16px;">Edit Goals in Settings</button>
+  `, {id:'goals', center:true});
+  $('#mClose').addEventListener('click', ()=> closeModal('goals'));
+  const editBtn = $('#goalsEditPrefs');
+  if(editBtn) editBtn.addEventListener('click', ()=>{ closeModal('goals'); openSettingsModal(); });
+}
+
+function openSettingsModal(){
+  render();
+  function render(){
+    const s = DB.settings;
+    const html = `
+      <div class="modal-head"><h3>Settings</h3><button class="icon-btn" id="mClose" aria-label="Close">✕</button></div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px;">
+        <div class="icon-badge" style="width:48px;height:48px;border-radius:14px;background:rgba(90,135,245,0.14);color:var(--blue-tint);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg></div>
+        <div style="min-width:0;">
+          <div style="font-family:'Oswald','Arial Narrow',Impact,sans-serif;font-size:16px;text-transform:uppercase;">${escapeHtml(unitLabel()==='kg'?'Metric':'Imperial')} · Local Data</div>
+          <div class="sub">${s.lastSavedAt? 'Saved '+new Date(s.lastSavedAt).toLocaleString() : 'Nothing saved yet'}</div>
+        </div>
+      </div>
+      <div class="card-title">Preferences</div>
+      <div class="field"><label>Units</label>
+        <div class="seg"><button data-u="lbs" class="${s.units==='lbs'?'active':''}">Imperial (lbs)</button><button data-u="kg" class="${s.units==='kg'?'active':''}">Metric (kg)</button></div>
+      </div>
+      <div class="field"><label>Default Rest Timer (sec)</label><input class="input" id="setRest" type="number" value="${s.restDefault}"></div>
+      <div class="field"><label>Show RPE / RIR on sets</label>
+        <div class="seg"><button data-rpe="off" class="${!s.showRPE?'active':''}">Off</button><button data-rpe="on" class="${s.showRPE?'active':''}">On</button></div>
+      </div>
+      <hr class="hairline">
+      <div class="card-title">Profile & Goals <span class="tick">for calorie calc</span></div>
+      <button class="btn btn-ghost btn-block" id="viewGoalsSummary" style="margin-bottom:12px;">View Goals Summary</button>
+      <div class="row">
+        <div class="field"><label>Height (cm)</label><input class="input" id="pHeight" type="number" value="${s.profile.heightCm??''}"></div>
+        <div class="field"><label>Weight (${unitLabel()})</label><input class="input" id="pWeight" type="number" value="${s.profile.weightLbs? fmt1(toDisplayWeight(s.profile.weightLbs)) : ''}"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Age</label><input class="input" id="pAge" type="number" value="${s.profile.age??''}"></div>
+        <div class="field"><label>Sex (for BMR formula)</label>
+          <div class="seg"><button data-sex="female" class="${s.profile.sex==='female'?'active':''}">Female</button><button data-sex="male" class="${s.profile.sex==='male'?'active':''}">Male</button></div>
+          ${!s.profile.sex? `<div class="sub" style="margin-top:4px;">Not set — pick one to enable BMR/TDEE calculations.</div>` : ''}
+        </div>
+      </div>
+      <div class="field"><label>Activity Level</label>
+        <select class="input" id="pActivity">
+          <option value="1.2" ${s.profile.activityLevel===1.2?'selected':''}>Sedentary (little exercise)</option>
+          <option value="1.375" ${s.profile.activityLevel===1.375?'selected':''}>Light (1-3 days/week)</option>
+          <option value="1.55" ${s.profile.activityLevel===1.55?'selected':''}>Moderate (3-5 days/week)</option>
+          <option value="1.725" ${s.profile.activityLevel===1.725?'selected':''}>Very active (6-7 days/week)</option>
+          <option value="1.9" ${s.profile.activityLevel===1.9?'selected':''}>Athlete (2x/day)</option>
+        </select>
+      </div>
+      <div class="field"><label>Goal Weight (${unitLabel()}) <span style="color:var(--faint);">optional</span></label><input class="input" id="pGoalWeight" type="number" step="0.1" value="${s.profile.goalWeightLbs? fmt1(toDisplayWeight(s.profile.goalWeightLbs)) : ''}"></div>
+      <div class="field"><label>Goal</label>
+        <div class="seg">
+          <button data-goaltype="lose" class="${s.profile.goalType==='lose'?'active':''}">Lose</button>
+          <button data-goaltype="maintain" class="${(!s.profile.goalType||s.profile.goalType==='maintain')?'active':''}">Maintain</button>
+          <button data-goaltype="gain" class="${s.profile.goalType==='gain'?'active':''}">Gain</button>
+        </div>
+      </div>
+      <div class="field" id="intensityField" style="${(s.profile.goalType==='lose'||s.profile.goalType==='gain')?'':'display:none;'}"><label>Intensity</label>
+        <div class="seg">
+          <button data-intensity="slow" class="${s.profile.intensity==='slow'?'active':''}">Slow</button>
+          <button data-intensity="normal" class="${(!s.profile.intensity||s.profile.intensity==='normal')?'active':''}">Normal</button>
+          <button data-intensity="aggressive" class="${s.profile.intensity==='aggressive'?'active':''}">Aggressive</button>
+        </div>
+      </div>
+      <button class="btn btn-block" id="pSave">Save Profile</button>
+      <div id="bmrResult" style="margin-top:10px;"></div>
+      <hr class="hairline">
+      <div class="card-title">Data</div>
+      <div class="sub" style="margin-bottom:10px;">All data lives in this browser. Export a backup file regularly — clearing browser data erases everything.</div>
+      <div class="sub mono" style="margin-bottom:10px;">Last saved: ${s.lastSavedAt? new Date(s.lastSavedAt).toLocaleString() : 'never'}<br>Last exported: ${s.lastExportedAt? new Date(s.lastExportedAt).toLocaleString() : 'never'}</div>
+      <div class="sub" style="margin-bottom:10px;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;">Multi-account cloud sync is coming in a future version. For now all data stays on this device — use Export Backup regularly.</div>
+      <div class="row" style="margin-bottom:10px;">
+        <button class="btn" id="exportData">Export Backup</button>
+        <button class="btn" id="importData">Import Backup</button>
+      </div>
+      <input type="file" id="importFile" accept="application/json" class="hidden">
+      <button class="btn btn-danger btn-block" id="resetData">Erase All Data</button>
+    `;
+    const existing = $('#backdrop-settings');
+    if(existing) existing.querySelector('.modal').innerHTML = html; else openModal(html, {id:'settings', center:false});
+    $('#mClose').addEventListener('click', ()=> closeModal('settings'));
+    const viewGoalsBtn = $('#viewGoalsSummary');
+    if(viewGoalsBtn) viewGoalsBtn.addEventListener('click', openGoalsModal);
+    $$('[data-u]').forEach(b=> b.addEventListener('click', ()=>{ DB.settings.units = b.dataset.u; save(); render(); rerender(); }));
+    let pendingSex = s.profile.sex;
+    $$('[data-sex]').forEach(b=> b.addEventListener('click', ()=>{
+      pendingSex = b.dataset.sex;
+      $$('[data-sex]').forEach(x=> x.classList.toggle('active', x.dataset.sex===pendingSex));
+    }));
+    let pendingGoalType = s.profile.goalType || 'maintain';
+    let pendingIntensity = s.profile.intensity || 'normal';
+    $$('[data-goaltype]').forEach(b=> b.addEventListener('click', ()=>{
+      pendingGoalType = b.dataset.goaltype;
+      $$('[data-goaltype]').forEach(x=> x.classList.toggle('active', x.dataset.goaltype===pendingGoalType));
+      const intField = $('#intensityField');
+      if(intField) intField.style.display = (pendingGoalType==='lose'||pendingGoalType==='gain') ? '' : 'none';
+    }));
+    $$('[data-intensity]').forEach(b=> b.addEventListener('click', ()=>{
+      pendingIntensity = b.dataset.intensity;
+      $$('[data-intensity]').forEach(x=> x.classList.toggle('active', x.dataset.intensity===pendingIntensity));
+    }));
+    $$('[data-rpe]').forEach(b=> b.addEventListener('click', ()=>{
+      DB.settings.showRPE = b.dataset.rpe==='on';
+      save();
+      $$('[data-rpe]').forEach(x=> x.classList.toggle('active', x.dataset.rpe===b.dataset.rpe));
+    }));
+    $('#setRest').addEventListener('change', e=>{
+      const v = parseInt(e.target.value);
+      DB.settings.restDefault = (!isNaN(v) && v>=0) ? v : 90; // explicit 0 is valid — don't || it away
+      save();
+    });
+    $('#pSave').addEventListener('click', ()=>{
+      const wRaw = $('#pWeight').value, gwRaw = $('#pGoalWeight').value;
+      const wBlank = String(wRaw).trim()==='', gwBlank = String(gwRaw).trim()==='';
+      const wParsed = wBlank ? null : parsePositiveWeight(wRaw);
+      const gwParsed = gwBlank ? null : parsePositiveWeight(gwRaw);
+      if(!wBlank && wParsed==null){ toast('Enter a valid weight greater than 0, or leave it blank'); return; }
+      if(!gwBlank && gwParsed==null){ toast('Enter a valid goal weight greater than 0, or leave it blank'); return; }
+      const p = DB.settings.profile;
+      p.heightCm = parseFloat($('#pHeight').value)||null;
+      p.weightLbs = wParsed!=null ? fromDisplayWeight(wParsed) : null;
+      p.age = parseInt($('#pAge').value)||null;
+      p.sex = pendingSex;
+      p.activityLevel = parseFloat($('#pActivity').value)||1.375;
+      p.goalWeightLbs = gwParsed!=null ? fromDisplayWeight(gwParsed) : null;
+      p.goalType = pendingGoalType;
+      p.intensity = pendingIntensity;
+      save();
+      const bmr = computeBMR(), tdee = computeTDEE();
+      $('#bmrResult').innerHTML = bmr? `<div class="stat-grid"><div class="stat-box"><div class="sv">${bmr}</div><div class="sl">BMR (kcal/day)</div></div><div class="stat-box"><div class="sv">${tdee}</div><div class="sl">Maintenance TDEE</div></div></div>` : `<div class="sub">Add height, weight, age and sex to calculate BMR.</div>`;
+      toast('Profile saved');
+      rerender();
+    });
+    $('#exportData').addEventListener('click', ()=>{
+      DB.settings.lastExportedAt = new Date().toISOString();
+      save();
+      const payload = { e1fitnessBackup:true, schemaVersion: DB.schemaVersion||SCHEMA_VERSION, exportedAt: DB.settings.lastExportedAt, db: DB };
+      const json = JSON.stringify(payload,null,2);
+      const filename = 'e1fitness-backup-'+todayISO()+'.json';
+      // Inside the native app shell there's no browser download manager to
+      // catch an <a download> click, so it silently does nothing — use the
+      // native Share Sheet instead. Plain web (desktop/browser) keeps the
+      // exact original download-link behavior, unchanged.
+      if(window.e1Native && window.e1Native.isNative){
+        window.e1Native.exportBackup(filename, json)
+          .then(()=> toast('Backup ready to save'))
+          .catch(()=> toast('Could not prepare the backup for sharing'));
+        return;
+      }
+      const blob = new Blob([json], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href=url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+      toast('Backup downloaded');
+    });
+    $('#importData').addEventListener('click', ()=> $('#importFile').click());
+    $('#importFile').addEventListener('change', e=>{
+      const file = e.target.files[0]; if(!file) return;
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        let raw;
+        try{ raw = JSON.parse(reader.result); }
+        catch(err){ openImportErrorModal(['That file is not valid JSON.']); return; }
+        // Backup files wrap the DB with metadata (schemaVersion, exportedAt); accept a
+        // bare DB object too, for backups exported before this wrapper existed.
+        const candidate = (raw && typeof raw==='object' && raw.db && raw.e1fitnessBackup) ? raw.db : raw;
+        const result = validateDB(candidate);
+        if(!result.valid){
+          openImportErrorModal(result.errors);
+          return;
+        }
+        // Safety backup of the CURRENT (pre-import) data, so a bad import can always
+        // be undone even though it already passed validation — restorable via the
+        // browser console: localStorage.getItem('e1fitness_db_v1_preimport_backup').
+        try{ localStorage.setItem(STORE_KEY+'_preimport_backup', JSON.stringify(DB)); }catch(err){ /* best-effort */ }
+        // Defense in depth: validateDB() already rejects malformed shapes, but
+        // migrate()/backfillDefaults() run on a deep-cloned candidate first —
+        // if anything in that step throws for an unforeseen reason, the live
+        // DB must never end up partially replaced.
+        let merged;
+        try{
+          merged = migrate(backfillDefaults(JSON.parse(JSON.stringify(candidate))));
+        }catch(err){
+          console.warn('Import failed while applying migrations', err);
+          openImportErrorModal(['This backup passed initial checks but could not be loaded safely. Your current data was not changed.']);
+          return;
+        }
+        DB = merged;
+        save();
+        closeModal('settings');
+        rerender();
+        toast(result.warnings.length
+          ? `Backup restored with ${result.warnings.length} minor warning(s) — see console`
+          : 'Backup restored');
+        if(result.warnings.length) console.warn('Import warnings:', result.warnings);
+      };
+      reader.onerror = ()=> openImportErrorModal(['The file could not be read.']);
+      reader.readAsText(file);
+      e.target.value = ''; // allow re-selecting the same file next time
+    });
+    $('#resetData').addEventListener('click', ()=>{
+      openConfirmModal('This permanently erases every workout, food log, template, meal, measurement and setting from this device. This cannot be undone.', ()=>{
+        DB = defaultDB(); seedData(DB); save(); closeModal('settings'); rerender(); toast('All data erased');
+      }, {title:'Erase All Data?', confirmLabel:'Erase Everything', danger:true});
+    });
+  }
+}
+$('#settingsBtn').addEventListener('click', openSettingsModal);
+
+/* =========================================================
+   ONBOARDING (first launch only) — item 10
+   Shown when DB.settings.onboarded is false. Collects units,
+   then calorie/protein goals (with sensible defaults already
+   pre-filled), then a confirmation step before entering the app.
+   ========================================================= */
+let onboardStep = 1;
+let onboardDraft = { units:'lbs', calories:2200, protein:150 };
+function renderOnboarding(){
+  const root = $('#onboardingRoot');
+  const stepsHtml = `<div class="onboard-steps">${[1,2,3].map(n=>`<span class="${onboardStep>=n?'done':''}"></span>`).join('')}</div>`;
+  let body = '';
+  if(onboardStep===1){
+    body = `
+      <div class="onboard-icon"><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M4 9l3-3 2.5 2.5-3 3zM20 15l-3 3-2.5-2.5 3-3zM7 17l2-2M15 9l2-2"/></svg></div>
+      <h1 style="font-size:24px;margin-bottom:6px;">Welcome to E1FITNESS</h1>
+      <div class="sub" style="margin-bottom:22px;">First, how do you want to track weight?</div>
+      <div class="seg" style="margin-bottom:10px;">
+        <button data-ob-units="lbs" class="${onboardDraft.units==='lbs'?'active':''}">Imperial (lbs)</button>
+        <button data-ob-units="kg" class="${onboardDraft.units==='kg'?'active':''}">Metric (kg)</button>
+      </div>
+      <div class="sub">You can change this any time in Settings.</div>
+    `;
+  } else if(onboardStep===2){
+    body = `
+      <div class="onboard-icon"><svg viewBox="0 0 24 24"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3"/></svg></div>
+      <h1 style="font-size:24px;margin-bottom:6px;">Set your daily goals</h1>
+      <div class="sub" style="margin-bottom:18px;">Sensible defaults are filled in — adjust or use these to start.</div>
+      <div class="field"><label>Calorie Goal</label><input class="input" id="obCal" type="number" value="${onboardDraft.calories}"></div>
+      <div class="field"><label>Protein Goal (g)</label><input class="input" id="obProtein" type="number" value="${onboardDraft.protein}"></div>
+      <div class="sub">You can fine-tune carbs, fat, fiber, sodium and water later in Nutrition → Goals.</div>
+    `;
+  } else {
+    body = `
+      <div class="onboard-icon"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
+      <h1 style="font-size:24px;margin-bottom:6px;">You're ready</h1>
+      <div class="sub">Units: <b style="color:var(--paper);">${onboardDraft.units==='kg'?'Metric (kg)':'Imperial (lbs)'}</b> · Calorie goal: <b style="color:var(--paper);">${onboardDraft.calories}</b> · Protein goal: <b style="color:var(--paper);">${onboardDraft.protein}g</b></div>
+      <div class="sub" style="margin-top:10px;">Log your first workout or meal whenever you're ready — everything saves right on this device.</div>
+    `;
+  }
+  root.innerHTML = `
+    <div class="onboard-overlay">
+      ${stepsHtml}
+      <div class="onboard-body">${body}</div>
+      <div class="onboard-foot">
+        <div class="row">
+          ${onboardStep>1? `<button class="btn btn-ghost" id="obBack">Back</button>` : ''}
+          <button class="btn btn-primary btn-block" id="obNext">${onboardStep<3? 'Continue':'Go to Home'}</button>
+        </div>
+      </div>
+    </div>
+  `;
+  if(onboardStep===1){
+    $$('[data-ob-units]').forEach(b=> b.addEventListener('click', ()=>{ onboardDraft.units=b.dataset.obUnits; renderOnboarding(); }));
+  }
+  const back = $('#obBack');
+  if(back) back.addEventListener('click', ()=>{ onboardStep--; renderOnboarding(); });
+  $('#obNext').addEventListener('click', ()=>{
+    if(onboardStep===2){
+      const cal = parseFloat($('#obCal').value);
+      const prot = parseFloat($('#obProtein').value);
+      if(cal>0) onboardDraft.calories = cal;
+      if(prot>0) onboardDraft.protein = prot;
+    }
+    if(onboardStep<3){ onboardStep++; renderOnboarding(); return; }
+    // finish onboarding
+    DB.settings.units = onboardDraft.units;
+    DB.settings.goals.calories = onboardDraft.calories;
+    DB.settings.goals.protein = onboardDraft.protein;
+    DB.settings.onboarded = true;
+    save();
+    root.innerHTML = '';
+    updateTopDate();
+    setTab('dashboard');
+  });
+}
+
+/* Keeps the bottom of the active workout screen clear of the fixed rest-timer
+   bar (Session Notes / Session stats otherwise end up visually behind it once
+   scrolled to the bottom). Implemented as an observer on #restTimerRoot
+   rather than touching the rest-timer's own start/stop code, which is
+   confirmed working on-device and intentionally left alone here. */
+const restTimerPadObserver = new MutationObserver(()=>{
+  const root = $('#restTimerRoot');
+  const screen = $('#screen-workout');
+  if(!root || !screen) return;
+  screen.classList.toggle('rest-padding', root.childElementCount>0);
+});
+restTimerPadObserver.observe($('#restTimerRoot'), {childList:true});
+
+/* =========================================================
+   INIT
+   ========================================================= */
+if(DB_LOAD_CORRUPTED){
+  // Corruption implies a genuinely fresh in-memory DB, so onboarding's own
+  // "first launch" flow would be a plausible next step too — but showing
+  // both back to back would bury the warning. The warning takes priority;
+  // onboarding is skipped this one time so the message isn't missed.
+  // Shown BEFORE setTab()'s render rather than after, on purpose: #modalRoot
+  // is static markup already in the page, so this can never be skipped by
+  // an unrelated rendering error the way an "after render" call could be.
+  openDataRecoveryWarningModal();
+  updateTopDate();
+  setTab('dashboard');
+} else if(!DB.settings.onboarded){
+  renderOnboarding();
+} else {
+  // Same reasoning as above: fire before setTab()'s render, not after, so
+  // this safety-net warning can't be silently skipped by an unrelated
+  // rendering error further down.
+  if(DB_VALIDATION_WARNING){
+    toast('Some saved data looks unusual — consider exporting a backup from Settings > Data.');
+  } else if(needsBackupNudge()){
+    // Local-first with no cloud sync means a lost/reset device is total data
+    // loss -- this is the single highest-value safety nudge available given
+    // that architecture. Mutually exclusive with the validation warning
+    // above so only one toast ever competes for the user's attention.
+    toast('It’s been a while since your last backup.', {action:{label:'Export', onClick: openSettingsModal}});
+  }
+  updateTopDate();
+  setTab('dashboard');
+}

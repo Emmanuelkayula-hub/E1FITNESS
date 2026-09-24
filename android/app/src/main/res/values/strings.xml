@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">E1FITNESS</string>
+    <string name="title_activity_main">E1FITNESS</string>
+    <string name="package_name">com.e1fitness.app</string>
+    <string name="custom_url_scheme">com.e1fitness.app</string>
+</resources>
