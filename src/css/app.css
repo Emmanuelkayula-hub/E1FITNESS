@@ -14,7 +14,11 @@
   --paper:#0B1826;
   --muted:#5E6B76;
   --muted-2:#4C5964;
-  --faint:#98A3AC;
+  /* V31.1: darkened from #98A3AC -- the original failed WCAG AA text
+     contrast (2.26:1 on light backgrounds; needs 4.5:1). This value hits
+     ~5.6:1 on white / ~4.9:1 on --bg while staying the same muted gray-blue
+     hue, since --faint is still used decoratively (icon strokes) too. */
+  --faint:#62696F;
   --faint-2:#7E8B94;
   --blue:#2080F0;
   --blue-dim:#DCEBFC;
@@ -221,12 +225,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
    used for "Now" inside a workout) so "this program is the one I'm
    following" and "this is the exercise I'm on right now" never look like
    the same kind of badge. */
-.badge-active{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--green);background:rgba(22,163,74,0.14);border-radius:20px;padding:3px 9px;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
+/* V31.1: the badge's own text color is a darkened green (#11823B, ~4.9:1 on
+   its light tint fill) rather than var(--green) directly -- the brand
+   green (#16A34A) only hit 2.82:1 as TEXT on its own rgba(22,163,74,0.14)
+   tint background, which is what actually failed the audit; --green
+   itself is untouched (still used correctly elsewhere: fill colors, and
+   as text against the dark workout surfaces where it already had plenty
+   of contrast). The dot stays the true brand green since it's a small
+   decorative swatch, not text. */
+.badge-active{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#11823B;background:rgba(22,163,74,0.14);border-radius:20px;padding:3px 9px;font-family:'Oswald','Arial Narrow',Impact,sans-serif;}
 .badge-active::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);}
 
 /* Small +/-% change pill, e.g. on a chart card corner or a muscle-group row. */
 .pct-badge{font-size:11px;font-weight:700;font-family:'IBM Plex Mono','SF Mono','Roboto Mono',monospace;padding:2px 7px;border-radius:20px;flex:none;}
-.pct-badge.up{color:var(--green);background:rgba(22,163,74,0.14);}
+.pct-badge.up{color:#11823B;background:rgba(22,163,74,0.14);}
 .pct-badge.down{color:var(--muted);background:var(--surface-3);}
 
 /* Numeric stepper -- flanks a normal <input type=number> (still freely
@@ -309,8 +321,17 @@ textarea.input{resize:vertical;min-height:70px;}
 }
 .chip.warmup{color:var(--muted);}
 .chip.failure{color:var(--red);background:rgba(214,41,59,0.12);}
-.chip.drop{color:var(--ember);background:rgba(217,124,31,0.12);}
-.chip.pr{color:var(--green);background:rgba(22,163,74,0.12);}
+/* V31.1: darkened text color (#A25D17, ~5.1:1 on its own tint), same
+   reasoning as .badge-active above -- var(--ember) itself (#D97C1F) only
+   hit 2.49:1 as text on this background. --ember is untouched everywhere
+   else (fill colors, icon strokes, dark-surface text already had contrast
+   to spare). */
+.chip.drop{color:#A25D17;background:rgba(217,124,31,0.12);}
+/* V32: same darkened-text-on-tint treatment as .badge-active/.pct-badge.up
+   above (var(--green) alone was 2.82:1 on this fill, below WCAG AA) --
+   applied here too since this class is now actually rendered (History PR
+   indicator) rather than only declared. */
+.chip.pr{color:#11823B;background:rgba(22,163,74,0.12);}
 
 /* progress bars */
 .pbar{height:8px;border-radius:6px;background:var(--surface-3);overflow:hidden;}

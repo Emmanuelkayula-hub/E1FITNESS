@@ -82,6 +82,14 @@ function dateLabel(iso){
 }
 
 /* ---------------- Modal helpers ---------------- */
+// V31.1: per-modal-id record of the element focus should return to on close
+// (whatever was focused right before openModal() ran -- almost always the
+// button that triggered it), keyed the same way _modalReturnFocus is.
+const _modalReturnFocus = {};
+function focusableEls(container){
+  return Array.from(container.querySelectorAll('button, a[href], input, select, textarea, [tabindex]'))
+    .filter(el=> !el.disabled && el.tabIndex!==-1 && el.offsetParent!==null);
+}
 function openModal(innerHtml, {center=false, id='m'}={}){
   const root = $('#modalRoot');
   const back = document.createElement('div');
@@ -98,12 +106,40 @@ function openModal(innerHtml, {center=false, id='m'}={}){
   // reacts to a click on ITS OWN ✕ (or its own empty backdrop area),
   // regardless of what any other open modal's elements are also called.
   back.addEventListener('click', (e)=>{ if(e.target===back || e.target.closest('#mClose')) closeModal(id); });
+  // V31.1: Escape closes, and Tab/Shift+Tab wrap within the modal instead of
+  // escaping to whatever's underneath -- a lightweight trap (no framework),
+  // scoped to this one backdrop so nested/stacked modals each keep their
+  // own. Both keys only ever matter while focus is inside `back` in the
+  // first place, since that's the only place this listener can fire from.
+  back.addEventListener('keydown', (e)=>{
+    if(e.key==='Escape'){ e.stopPropagation(); closeModal(id); return; }
+    if(e.key==='Tab'){
+      const modalEl = $('.modal', back);
+      const list = focusableEls(modalEl);
+      if(list.length===0) return;
+      const first = list[0], last = list[list.length-1];
+      if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+      else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+    }
+  });
+  _modalReturnFocus[id] = document.activeElement;
   root.appendChild(back);
+  // Move focus into the modal on open -- previously it stayed on the
+  // trigger button behind an now-covering modal, so a keyboard user had to
+  // tab through the rest of the page (modalRoot is last in the DOM) before
+  // ever reaching the modal's own controls.
+  const modalEl = $('.modal', back);
+  const first = focusableEls(modalEl)[0];
+  if(first) first.focus();
+  else { modalEl.setAttribute('tabindex','-1'); modalEl.focus(); }
   return back;
 }
 function closeModal(id='m'){
   const el = $('#backdrop-'+id);
   if(el) el.remove();
+  const returnEl = _modalReturnFocus[id];
+  delete _modalReturnFocus[id];
+  if(returnEl && document.body.contains(returnEl) && typeof returnEl.focus==='function') returnEl.focus();
 }
 function closeAllModals(){ $('#modalRoot').innerHTML=''; }
 
@@ -2724,6 +2760,38 @@ function sessionPRsAchieved(s){
   return results;
 }
 
+/* V32: "which sessions contain at least one PR" for every session at once,
+   for the History list's PR indicator. Same semantics as looping
+   sessionPRsAchieved(s) over every session (each session's PR status still
+   only depends on sessions strictly before it), but computed as a single
+   chronological pass with a running best-1RM-per-exercise map instead of
+   re-scanning all prior sessions from scratch for every row -- O(sessions)
+   instead of O(sessions²), which matters once history runs into the
+   hundreds. Returns a Set of session ids. */
+function allSessionPRIds(){
+  const sorted = [...DB.sessions].sort((a,b)=> a.date===b.date ? (a.startedAt||0)-(b.startedAt||0) : (a.date<b.date?-1:1));
+  const bestByExercise = {};
+  const prIds = new Set();
+  sorted.forEach(s=>{
+    (s.groups||[]).forEach(g=>g.forEach(exEntry=>{
+      if(exEntry.exType!=='weight_reps') return;
+      let sessionBest1RM=0;
+      (exEntry.sets||[]).forEach(set=>{
+        if(!isWorkingSet(set) || set.weight==null || set.reps==null) return;
+        const orm = estimate1RM(set.weight, set.reps);
+        if(orm>sessionBest1RM) sessionBest1RM=orm;
+      });
+      if(sessionBest1RM<=0) return;
+      const priorBest = bestByExercise[exEntry.exerciseId] || 0;
+      if(sessionBest1RM>priorBest){
+        bestByExercise[exEntry.exerciseId] = sessionBest1RM;
+        prIds.add(s.id);
+      }
+    }));
+  });
+  return prIds;
+}
+
 /* Real-time PR toast, fired the instant a set is checked off — not just at
    finish-workout time. Only ever compares against actual completed sessions
    already in history (computePRs never sees the in-progress session), so
@@ -2802,7 +2870,23 @@ function renderTemplateDetail(root){
       ${r.groups.map((g,gi)=> g.map((item,ii)=>{
         const e = exById(item.exerciseId);
         const label = g.length>1 ? String.fromCharCode(65+gi)+(ii+1)+' · ' : '';
-        return `<div class="list-row"><div class="lr-main"><div class="lr-title">${label}${escapeHtml(e?e.name:'?')}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div></div></div>`;
+        // V33: "what did I do last time" before the user even starts the
+        // workout, reusing the exact same derivations Active Workout uses
+        // (lastSessionLineForExercise / suggestNextLoad) rather than a
+        // second history lookup -- one source of truth for "last time" and
+        // for what counts as an "up" suggestion. Kept to one extra line per
+        // exercise (no per-set breakdown, no continue/repeat chip here --
+        // those already have a natural home once the workout is under way)
+        // so a 6-exercise routine doesn't turn into a wall of text.
+        const last = e ? lastSessionLineForExercise(e.id) : null;
+        const suggestion = e ? suggestNextLoad({exType:e.type, targetRepsMin:item.targetRepsMin, targetRepsMax:item.targetRepsMax}, previousSetsForExercise(e.id)) : null;
+        const lastLine = last
+          ? `<div class="lr-sub" style="margin-top:2px;">Last time: ${escapeHtml(last.line)}</div>`
+          : `<div class="lr-sub" style="margin-top:2px;color:var(--faint);">No previous session</div>`;
+        const upChip = suggestion && suggestion.type==='up'
+          ? ` <span class="chip pr" style="vertical-align:middle;">Try ${escapeHtml(fmt1(toDisplayWeight(suggestion.weight)))} ${escapeHtml(unitLabel())}</span>`
+          : '';
+        return `<div class="list-row"><div class="lr-main"><div class="lr-title">${label}${escapeHtml(e?e.name:'?')}${upChip}</div><div class="lr-sub">${escapeHtml(routineItemSummary(item))}</div>${lastLine}</div></div>`;
       }).join('')).join('')}
     </div>
     <button class="btn btn-primary btn-block" id="startTemplate" style="margin-bottom:14px;">Start This Template</button>
@@ -4251,10 +4335,20 @@ function completeSession(){
 /* ---------------- History ---------------- */
 function renderWkHistory(root){
   const sorted = [...DB.sessions].sort((a,b)=> b.startedAt-a.startedAt);
+  // V32: "did this workout include a PR" at a glance, without opening every
+  // session -- computed once for the whole list (see allSessionPRIds for
+  // why this is a single pass rather than N lookups).
+  const prIds = allSessionPRIds();
   root.innerHTML = backHeader('History', ()=> wkNav('home'));
   root.innerHTML += `<div class="card">${sorted.map(s=>`
     <div class="list-row" data-sess="${s.id}" style="cursor:pointer;">
-      <div class="lr-main"><div class="lr-title">${escapeHtml(s.routineName)}</div><div class="lr-sub">${dateLabel(s.date)} · ${s.durationMin||'-'} min · ${fmtInt(toDisplayWeight(sessionVolume(s)))} ${unitLabel()} vol</div></div>
+      <div class="lr-main">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <div class="lr-title" style="flex:1;min-width:0;">${escapeHtml(s.routineName)}</div>
+          ${prIds.has(s.id)?'<span class="chip pr" style="flex:none;">PR</span>':''}
+        </div>
+        <div class="lr-sub">${dateLabel(s.date)} · ${s.durationMin||'-'} min · ${fmtInt(toDisplayWeight(sessionVolume(s)))} ${unitLabel()} vol</div>
+      </div>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
     </div>`).join('') || '<div class="empty"><div class="e-title">No workouts yet</div><div class="e-sub">Your finished sessions will show up here.</div><button class="btn btn-sm btn-primary" id="emptyStartWorkout" style="margin-top:10px;">Start a Workout</button></div>'}
   </div>`;
